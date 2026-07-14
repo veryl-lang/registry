@@ -16,7 +16,12 @@ jobs:
   apply:
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials: false so checkout does not leave a git auth header
+      # behind; with checkout@v6 it collides with the token create-pull-request
+      # configures, producing "Duplicate header: Authorization" (HTTP 400).
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
