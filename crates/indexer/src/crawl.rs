@@ -201,7 +201,7 @@ pub fn run(args: CrawlArgs) -> Result<()> {
                     repo: entry.repo.clone(),
                     description: project.description.clone(),
                     license: project.license.clone(),
-                    authors: project.authors.clone(),
+                    authors: sanitize_authors(&project.authors),
                     updated,
                 };
                 write_project_meta(&args.docs_out, owner, repo, &project.name, &project_meta);
@@ -468,6 +468,18 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Drop emails so the registry never republishes contact addresses:
+/// `"Name <email>"` keeps `"Name"`, a bare email is dropped.
+fn sanitize_authors(authors: &[String]) -> Vec<String> {
+    authors
+        .iter()
+        .filter_map(|a| {
+            let name = a.split('<').next().unwrap_or("").trim();
+            (!name.is_empty() && !name.contains('@')).then(|| name.to_string())
+        })
+        .collect()
+}
+
 fn write_project_meta(docs_out: &Path, owner: &str, repo: &str, project: &str, meta: &ProjectMeta) {
     let dir = docs_out.join(owner).join(repo).join(project);
     let _ = fs::create_dir_all(&dir);
@@ -564,7 +576,9 @@ fn scan_docs(docs_out: &Path) -> Vec<GalleryProject> {
                     project: dir_name(&project),
                     description: meta.description,
                     license: meta.license,
-                    authors: meta.authors,
+                    // Also on read: a sidecar a clone-failure crawl couldn't rewrite
+                    // must not leak emails.
+                    authors: sanitize_authors(&meta.authors),
                     updated: meta.updated,
                     versions,
                 });
@@ -972,6 +986,20 @@ mod tests {
         assert!(doc_stamp_matches(&dir, &fp)); // matches after stamping -> skip
         assert!(!doc_stamp_matches(&dir, "deadbeefdeadbeef")); // changed chrome -> rebuild
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sanitize_authors_strips_emails() {
+        assert_eq!(
+            sanitize_authors(&[
+                "Naoya Hatta <a@b.com>".into(),
+                "a@b.com".into(),
+                "Alice".into(),
+            ]),
+            vec!["Naoya Hatta".to_string(), "Alice".to_string()]
+        );
+        // authors given only as a bare email produce nothing (no address shown)
+        assert!(sanitize_authors(&["dalance@gmail.com".into()]).is_empty());
     }
 
     #[test]
