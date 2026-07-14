@@ -205,6 +205,11 @@ pub fn run(args: CrawlArgs) -> Result<()> {
                     updated,
                 };
                 write_project_meta(&args.docs_out, owner, repo, &project.name, &project_meta);
+
+                // Immutable pages fetch this at runtime, so they still list versions
+                // published after they were built.
+                sort_versions_desc(&mut versions);
+                write_versions_json(&args.docs_out, owner, repo, &project.name, &versions);
             }
         }
 
@@ -340,26 +345,33 @@ const TOOLBAR_CSS: &str = "\
 .vlr-pkg{color:#9aa3ad;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}\n\
 .vlr-pkg a{color:#9aa3ad}\n\
 .vlr-pkg b{color:#e6e8eb;font-weight:600}\n\
-.vlr-ver{color:#5fd28a;font-weight:600;white-space:nowrap}\n\
+.vlr-ver{color:#5fd28a;font-weight:600;background:#2f3237;border:1px solid #3a3d42;border-radius:4px;padding:2px 4px;font-family:inherit;font-size:13px;cursor:pointer}\n\
 .vlr-spacer{margin-left:auto}\n\
 .vlr-ext{color:#5fd28a}\n\
 #mdbook-menu-bar.sticky{top:var(--vlr-h)!important}\n\
 #mdbook-sidebar{top:var(--vlr-h)!important;height:calc(100vh - var(--vlr-h))!important}\n\
 html{scroll-padding-top:calc(var(--vlr-h) + 3rem)}\n";
 
+// Version switcher. Absolute paths (`data-base`) work at any page depth; on change
+// it keeps the current sub-page in the target version, falling back to that version's
+// index. A const, not a format-string literal, so its braces need no escaping.
+const VER_SWITCH_JS: &str = "<script>(function(){var s=document.querySelector('.vlr-ver');if(!s){return;}var base=s.dataset.base,cur=s.dataset.current;fetch(base+'versions.json').then(function(r){return r.ok?r.json():[];}).then(function(a){if(!a.length){return;}s.innerHTML='';a.forEach(function(v){var o=document.createElement('option');o.value=v;o.textContent='v'+v;if(v===cur){o.selected=true;}s.appendChild(o);});}).catch(function(){});s.addEventListener('change',function(){var v=s.value;if(!v||v===cur){return;}var prefix=base+cur+'/';var sub=location.pathname.indexOf(prefix)===0?location.pathname.slice(prefix.length):'';var t=base+v+'/'+sub;fetch(t,{method:'HEAD'}).then(function(r){location.assign(r.ok?t:base+v+'/');}).catch(function(){location.assign(base+v+'/');});});})();</script>";
+
 fn toolbar_html(meta: &DocMeta) -> String {
     format!(
         "<div class=\"vlr-bar\">\
-         <a class=\"vlr-home\" href=\"../../../../\"><span class=\"vlr-dot\"></span>Veryl registry</a>\
+         <a class=\"vlr-home\" href=\"/\"><span class=\"vlr-dot\"></span>Veryl registry</a>\
          <span class=\"vlr-pkg\"><a href=\"https://github.com/{o}/{r}\">{o}/{r}</a> &middot; <b>{p}</b></span>\
-         <span class=\"vlr-ver\">v{v}</span>\
+         <select class=\"vlr-ver\" aria-label=\"Version\" data-current=\"{v}\" data-base=\"/{o}/{r}/{p}/\"><option value=\"{v}\">v{v}</option></select>\
          <span class=\"vlr-spacer\"></span>\
          <a class=\"vlr-ext\" href=\"https://github.com/{o}/{r}\">Source &#8599;</a>\
+         {js}\
          </div>",
         o = esc(meta.owner),
         r = esc(meta.repo),
         p = esc(meta.project),
-        v = esc(meta.version)
+        v = esc(meta.version),
+        js = VER_SWITCH_JS,
     )
 }
 
@@ -461,6 +473,23 @@ fn write_project_meta(docs_out: &Path, owner: &str, repo: &str, project: &str, m
     let _ = fs::create_dir_all(&dir);
     if let Ok(json) = serde_json::to_string(meta) {
         let _ = fs::write(dir.join(META_FILE), json);
+    }
+}
+
+const VERSIONS_FILE: &str = "versions.json";
+
+/// The doc toolbar fetches this to populate its version dropdown.
+fn write_versions_json(
+    docs_out: &Path,
+    owner: &str,
+    repo: &str,
+    project: &str,
+    versions: &[String],
+) {
+    let dir = docs_out.join(owner).join(repo).join(project);
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(json) = serde_json::to_string(versions) {
+        let _ = fs::write(dir.join(VERSIONS_FILE), json);
     }
 }
 
@@ -597,9 +626,6 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 .pkg-dep code{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;color:var(--fg);white-space:nowrap;overflow-x:auto}\n\
 .pkg-dep .copy{flex:0 0 auto;font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:5px;padding:.1rem .55rem;cursor:pointer}\n\
 .pkg-dep .copy:hover{border-color:var(--brand);color:var(--brand)}\n\
-.versions{display:flex;flex-wrap:wrap;gap:.4rem}\n\
-.versions a{font-size:.76rem;color:var(--muted);text-decoration:none;border:1px solid var(--border);border-radius:999px;padding:.12rem .6rem}\n\
-.versions a:hover{border-color:var(--brand);color:var(--brand)}\n\
 .hidden{display:none}\n";
 
 // Client-side package search: no backend, filters the rendered list in place.
@@ -684,16 +710,8 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
                 "<div class=\"pkg-dep\"><code>{}</code><button class=\"copy\">Copy</button></div>\n",
                 esc(&dep)
             ));
-            body.push_str("<div class=\"versions\">\n");
-            for v in &versions {
-                body.push_str(&format!(
-                    "<a href=\"{s}/{p}/{v}/\">{v}</a>\n",
-                    s = esc(slug),
-                    p = esc(&p.project),
-                    v = esc(v)
-                ));
-            }
-            body.push_str("</div>\n</div>\n");
+            // Per-version links live in the doc toolbar's dropdown, not the card.
+            body.push_str("</div>\n");
         }
         body.push_str("</section>\n");
     }
@@ -807,11 +825,12 @@ mod tests {
         }];
         let html = gallery_html(&g);
         assert!(html.contains("https://github.com/alice/fifo"));
+        // the card links to the latest version's docs and shows it as the badge
         assert!(html.contains("alice/fifo/fifo/1.2.0/"));
-        // newest first
-        let i12 = html.find(">1.2.0<").unwrap();
-        let i10 = html.find(">1.0.0<").unwrap();
-        assert!(i12 < i10);
+        assert!(html.contains("v1.2.0"));
+        // per-version chips were removed (switching moved to the doc toolbar), so
+        // older versions are not linked from the card
+        assert!(!html.contains("alice/fifo/fifo/1.0.0/"));
         // copy-pasteable dependency snippet (github shorthand + latest version)
         assert!(html.contains("class=\"pkg-dep\""));
         assert!(html.contains("github = &quot;alice/fifo&quot;, version = &quot;1.2.0&quot;"));
@@ -855,7 +874,7 @@ mod tests {
             version: "1.2.0",
         };
         let bar = toolbar_html(&meta);
-        assert!(bar.contains("href=\"../../../../\"")); // home = gallery root
+        assert!(bar.contains("href=\"/\"")); // home = gallery root (absolute)
         assert!(bar.contains("https://github.com/alice/fifo"));
         assert!(bar.contains("v1.2.0"));
 
@@ -953,5 +972,21 @@ mod tests {
         assert!(doc_stamp_matches(&dir, &fp)); // matches after stamping -> skip
         assert!(!doc_stamp_matches(&dir, "deadbeefdeadbeef")); // changed chrome -> rebuild
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toolbar_has_runtime_version_dropdown() {
+        let meta = DocMeta {
+            owner: "a",
+            repo: "b",
+            project: "p",
+            version: "1.2.0",
+        };
+        let bar = toolbar_html(&meta);
+        assert!(bar.contains("<select class=\"vlr-ver\""));
+        assert!(bar.contains("data-current=\"1.2.0\"")); // current version marked
+        assert!(bar.contains("data-base=\"/a/b/p/\"")); // absolute base for paths
+        assert!(bar.contains("versions.json")); // dropdown populated at runtime
+        assert!(bar.contains(">v1.2.0<")); // initial option works without JS
     }
 }
