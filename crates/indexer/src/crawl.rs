@@ -68,6 +68,7 @@ struct Project {
     description: Option<String>,
     license: Option<String>,
     authors: Vec<String>,
+    categories: Vec<String>,
 }
 
 /// One project's documented versions + display metadata, for the gallery.
@@ -77,6 +78,7 @@ struct GalleryProject {
     description: Option<String>,
     license: Option<String>,
     authors: Vec<String>,
+    categories: Vec<String>,
     updated: Option<String>,
     versions: Vec<String>,
 }
@@ -92,12 +94,50 @@ struct ProjectMeta {
     license: Option<String>,
     #[serde(default)]
     authors: Vec<String>,
+    /// Recognized category slugs (see `CATEGORIES`).
+    #[serde(default)]
+    categories: Vec<String>,
     /// Commit date (YYYY-MM-DD) of the latest release's revision.
     #[serde(default)]
     updated: Option<String>,
 }
 
 const META_FILE: &str = "registry-meta.json";
+
+/// Controlled category vocabulary: `(slug, display)`. Only these are surfaced;
+/// anything else in `Veryl.toml` `[project].categories` is dropped.
+const CATEGORIES: &[(&str, &str)] = &[
+    ("processor", "Processor"),
+    ("peripheral", "Peripheral"),
+    ("interconnect", "Interconnect / Bus"),
+    ("interface", "Interface / Connectivity"),
+    ("memory", "Memory"),
+    ("arithmetic", "Arithmetic / Math"),
+    ("crypto", "Crypto / Security"),
+    ("verification", "Verification"),
+    ("system", "System / Reference Design"),
+    ("utility", "Utility"),
+    ("tooling", "Tooling"),
+];
+
+/// Keep only recognized slugs (lowercased, de-duplicated) in canonical order, so
+/// every card lists its categories consistently.
+fn normalize_categories(raw: &[String]) -> Vec<String> {
+    let wanted: HashSet<String> = raw.iter().map(|c| c.trim().to_lowercase()).collect();
+    CATEGORIES
+        .iter()
+        .filter(|(slug, _)| wanted.contains(*slug))
+        .map(|(slug, _)| slug.to_string())
+        .collect()
+}
+
+/// Display name for a category slug, or the slug itself if unknown.
+fn category_display(slug: &str) -> &str {
+    CATEGORIES
+        .iter()
+        .find(|(s, _)| *s == slug)
+        .map_or(slug, |(_, d)| d)
+}
 
 pub fn run(args: CrawlArgs) -> Result<()> {
     let registry_dir = args.index_root.join("registry");
@@ -202,6 +242,7 @@ pub fn run(args: CrawlArgs) -> Result<()> {
                     description: project.description.clone(),
                     license: project.license.clone(),
                     authors: sanitize_authors(&project.authors),
+                    categories: normalize_categories(&project.categories),
                     updated,
                 };
                 write_project_meta(&args.docs_out, owner, repo, &project.name, &project_meta);
@@ -274,6 +315,7 @@ fn discover_projects(root: &Path) -> Vec<Project> {
                 description: info.description,
                 license: info.license,
                 authors: info.authors,
+                categories: info.categories,
             });
         }
     }
@@ -579,6 +621,7 @@ fn scan_docs(docs_out: &Path) -> Vec<GalleryProject> {
                     // Also on read: a sidecar a clone-failure crawl couldn't rewrite
                     // must not leak emails.
                     authors: sanitize_authors(&meta.authors),
+                    categories: meta.categories,
                     updated: meta.updated,
                     versions,
                 });
@@ -640,6 +683,8 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 .pkg-dep code{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;color:var(--fg);white-space:nowrap;overflow-x:auto}\n\
 .pkg-dep .copy{flex:0 0 auto;font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:5px;padding:.1rem .55rem;cursor:pointer}\n\
 .pkg-dep .copy:hover{border-color:var(--brand);color:var(--brand)}\n\
+.cats{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.55rem}\n\
+.cat{font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.12rem .55rem}\n\
 .hidden{display:none}\n";
 
 // Client-side package search: no backend, filters the rendered list in place.
@@ -676,13 +721,20 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
             sort_versions_desc(&mut versions);
             let latest = versions.first().cloned().unwrap_or_default();
             // Searchable text (name + repo + description + license + authors).
+            let cat_search = p
+                .categories
+                .iter()
+                .map(|c| format!("{} {}", c, category_display(c)))
+                .collect::<Vec<_>>()
+                .join(" ");
             let haystack = format!(
-                "{} {} {} {} {}",
+                "{} {} {} {} {} {}",
                 p.project,
                 slug,
                 p.description.as_deref().unwrap_or(""),
                 p.license.as_deref().unwrap_or(""),
-                p.authors.join(" ")
+                p.authors.join(" "),
+                cat_search,
             )
             .to_lowercase();
             body.push_str(&format!(
@@ -725,6 +777,16 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
                 esc(&dep)
             ));
             // Per-version links live in the doc toolbar's dropdown, not the card.
+            if !p.categories.is_empty() {
+                body.push_str("<div class=\"cats\">\n");
+                for c in &p.categories {
+                    body.push_str(&format!(
+                        "<span class=\"cat\">{}</span>\n",
+                        esc(category_display(c))
+                    ));
+                }
+                body.push_str("</div>\n");
+            }
             body.push_str("</div>\n");
         }
         body.push_str("</section>\n");
@@ -834,6 +896,7 @@ mod tests {
             description: Some("An async FIFO".into()),
             license: None,
             authors: vec![],
+            categories: vec!["memory".into()],
             updated: None,
             versions: vec!["1.0.0".into(), "1.2.0".into()],
         }];
@@ -845,6 +908,9 @@ mod tests {
         // per-version chips were removed (switching moved to the doc toolbar), so
         // older versions are not linked from the card
         assert!(!html.contains("alice/fifo/fifo/1.0.0/"));
+        // category chip (display name) rendered and searchable
+        assert!(html.contains("class=\"cat\">Memory<"));
+        assert!(html.contains("data-search=") && html.to_lowercase().contains("memory"));
         // copy-pasteable dependency snippet (github shorthand + latest version)
         assert!(html.contains("class=\"pkg-dep\""));
         assert!(html.contains("github = &quot;alice/fifo&quot;, version = &quot;1.2.0&quot;"));
@@ -858,6 +924,7 @@ mod tests {
             description: Some("Cryptographic core".into()),
             license: None,
             authors: vec![],
+            categories: vec![],
             updated: None,
             versions: vec!["1.0.0".into()],
         }];
@@ -921,6 +988,7 @@ mod tests {
                 description: Some("An async FIFO".into()),
                 license: Some("MIT OR Apache-2.0".into()),
                 authors: vec!["alice".into()],
+                categories: vec!["memory".into()],
                 updated: Some("2026-05-01".into()),
             },
         );
@@ -1016,5 +1084,19 @@ mod tests {
         assert!(bar.contains("data-base=\"/a/b/p/\"")); // absolute base for paths
         assert!(bar.contains("versions.json")); // dropdown populated at runtime
         assert!(bar.contains(">v1.2.0<")); // initial option works without JS
+    }
+
+    #[test]
+    fn normalize_categories_keeps_known_canonical() {
+        // case-insensitive, unknowns dropped, deduped, canonical (CATEGORIES) order
+        let got = normalize_categories(&[
+            "Memory".into(),
+            "bogus".into(),
+            "PROCESSOR".into(),
+            "memory".into(),
+        ]);
+        assert_eq!(got, vec!["processor".to_string(), "memory".to_string()]);
+        assert!(normalize_categories(&["not-a-category".into()]).is_empty());
+        assert_eq!(category_display("memory"), "Memory");
     }
 }

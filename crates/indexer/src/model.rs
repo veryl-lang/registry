@@ -36,6 +36,8 @@ struct VerylProject {
     license: Option<String>,
     #[serde(default)]
     authors: Vec<String>,
+    #[serde(default)]
+    categories: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +51,7 @@ pub struct ProjectInfo {
     pub description: Option<String>,
     pub license: Option<String>,
     pub authors: Vec<String>,
+    pub categories: Vec<String>,
 }
 
 /// Minimal lax view of `Veryl.pub`.
@@ -75,6 +78,7 @@ pub fn read_project(veryl_toml: &Path) -> Option<ProjectInfo> {
         description: parsed.project.description,
         license: parsed.project.license,
         authors: parsed.project.authors,
+        categories: parsed.project.categories,
     })
 }
 
