@@ -1,0 +1,9 @@
+[package]
+name = "registry-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+semver = "1.0"
+serde  = { version = "1.0", features = ["derive"] }

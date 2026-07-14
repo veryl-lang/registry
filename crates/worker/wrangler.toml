@@ -1,0 +1,20 @@
+name = "veryl-registry"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-01-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+[vars]
+INDEX_REPO = "veryl-lang/registry"
+
+# Secret (do not put here): the token used to fire repository_dispatch on the
+# index repo. Set with:  wrangler secret put GITHUB_TOKEN
+# Use a fine-grained token scoped to the index repo with "Contents: read/write"
+# (repository_dispatch is covered by the Contents permission), or a GitHub App
+# installation token.
+#
+# Abuse control: configure a Cloudflare Rate Limiting rule on this route (e.g.
+# ~5 requests/min per IP on POST /-/submit) in the dashboard/WAF. This runs at the
+# edge before the Worker, so the Worker stays stateless. Combined with the index
+# Action opening a PR only when the entry actually changes, this blunts spam.

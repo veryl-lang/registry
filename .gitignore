@@ -1,0 +1,12 @@
+# Rust
+/target/
+
+# Cloudflare Worker / Node tooling
+node_modules/
+worker/node_modules/
+.wrangler/
+dist/
+
+# Local env / secrets
+.dev.vars
+.env

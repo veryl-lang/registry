@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veryl-lang.org/registry/schema/entry.schema.json",
+  "title": "Veryl registry entry",
+  "description": "One registered Veryl repository. File path: registry/<owner>/<repo>.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["repo", "status", "registered_at"],
+  "properties": {
+    "repo": {
+      "type": "string",
+      "description": "Canonical host/owner/repo of the repository, e.g. github.com/alice/fifo",
+      "pattern": "^github\\.com/[^/]+/[^/]+$"
+    },
+    "projects": {
+      "type": "array",
+      "description": "Veryl project name(s) contained in the repository. The crawler is authoritative; this may be empty until the first successful crawl.",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z_][0-9a-zA-Z_]*$"
+      },
+      "default": []
+    },
+    "status": {
+      "type": "string",
+      "description": "pending: unverified or awaiting push; active: verified; yanked: removed by owner; disputed: under moderation",
+      "enum": ["pending", "active", "yanked", "disputed"]
+    },
+    "registered_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the entry was first created"
+    },
+    "registered_by": {
+      "type": "string",
+      "description": "Best-effort hint of the submitter (e.g. github:alice). Not trusted without OAuth.",
+      "default": ""
+    },
+    "last_verified": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "Last time verify-by-clone succeeded; null until first successful verification",
+      "default": null
+    }
+  }
+}

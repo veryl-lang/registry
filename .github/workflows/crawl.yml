@@ -1,0 +1,67 @@
+name: crawl
+
+# Build docs for every published version of every non-yanked entry. Runs on every
+# push to master (deploy on merge), daily (pick up new upstream releases), and on
+# demand. Read-only on the index; it only writes the docs site to gh-pages. Docs
+# are immutable per (repo, project, version) and skipped if already built with the
+# current chrome, so the gh-pages checkout makes crawling incremental.
+
+on:
+  # Any merge to master rebuilds the site immediately: a merged submission adds a
+  # new entry, and a normal PR may change the gallery/doc-page design. No paths
+  # filter, so design-only PRs deploy too. The schedule catches new upstream
+  # releases of already-registered repos between merges.
+  push:
+    branches:
+      - master
+  schedule:
+    - cron: "0 3 * * *" # daily 03:00 UTC (bounds "not pushed yet" latency to ~1 day)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild every doc version, ignoring the chrome stamp"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: crawl
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout index (master)
+        uses: actions/checkout@v6
+
+      - name: Checkout docs site (gh-pages)
+        uses: actions/checkout@v6
+        with:
+          ref: gh-pages
+          path: site
+        continue-on-error: true # first run: branch may not exist yet
+
+      # veryl comes prebuilt via the official action (no compiler build per crawl).
+      - uses: veryl-lang/setup-veryl@v1
+
+      # Rust is only needed to build the small indexer.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Crawl and build docs
+        run: |
+          mkdir -p site
+          cargo run -p registry-indexer --release -- crawl --docs-out site ${{ inputs.force && '--force' || '' }}
+
+      - name: Publish docs (gh-pages)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          # Rewrite the Pages custom-domain CNAME every run (peaceiris replaces
+          # the branch, which would otherwise drop it). Remove if not using one.
+          cname: registry.veryl-lang.org

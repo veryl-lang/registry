@@ -1,0 +1,52 @@
+name: registry-submit
+
+# Fired by the intake Worker via repository_dispatch when `veryl publish`
+# registers a repository. The indexer verifies and writes the entry file; this
+# workflow opens a pull request for a maintainer to merge (initial policy).
+
+on:
+  repository_dispatch:
+    types: [registry-submit]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Apply submission
+        id: apply
+        run: cargo run -p registry-indexer --release -- apply
+
+      - name: Create pull request
+        if: steps.apply.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: submit/${{ steps.apply.outputs.slug }}
+          add-paths: registry/**
+          commit-message: "Register ${{ steps.apply.outputs.slug }}"
+          title: "Register ${{ steps.apply.outputs.slug }} (${{ steps.apply.outputs.status }})"
+          # Maintainer-facing moderation note: the submitting author never sees this
+          # PR (it lands in this repo, not theirs). Author-facing guidance — e.g. to
+          # push — is emitted by the `veryl register` CLI, the only channel they read.
+          body: |
+            Automated registry submission for `${{ steps.apply.outputs.slug }}`.
+
+            **Status: `${{ steps.apply.outputs.status }}`** — the entry lands as written on merge.
+
+            - `active` — verified by clone: a `Veryl.toml` with the submitted project
+              name exists and its `Veryl.pub` has at least one release (the author's
+              opt-in proof).
+            - `pending` — the repo or its release was not visible at submission time
+              (e.g. the author has not pushed yet). Safe to merge: the crawl builds docs
+              once the repo is reachable, and the daily crawl (or a later re-submission)
+              reconciles it to `active`.
+
+            Merge to add the entry to the index; close to reject.
