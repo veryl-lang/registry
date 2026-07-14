@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veryl registry</title>
+<style>
+:root{--bg:#fcfaf6;--fg:#24262a;--muted:#5f6b7a;--link:#d46e13;--brand:#2baa59;--border:#e4e7ec;--card:#fff;--shadow:rgba(228,231,236,.6)}
+@media (prefers-color-scheme:dark){:root{--bg:#161a17;--fg:#e6e8eb;--muted:#9aa3ad;--link:#5fd28a;--brand:#5fd28a;--border:#2a2f34;--card:#1e2621;--shadow:rgba(0,0,0,.3)}}
+*{box-sizing:border-box}
+body{font-family:"Fira Sans",system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--bg);max-width:56rem;margin:0 auto;padding:2.2rem 1.25rem 4rem;line-height:1.6}
+.hero h1{font-size:1.9rem;margin:0;display:flex;align-items:center;gap:.55rem;font-weight:700}
+.hero .dot{width:.85rem;height:.85rem;border-radius:50%;background:var(--brand)}
+.hero .tagline{color:var(--muted);margin:.35rem 0 0}
+input#q{width:100%;padding:.6rem .8rem;margin:1.5rem 0 1.6rem;font:inherit;font-size:1rem;color:var(--fg);background:var(--card);border:1px solid var(--border);border-radius:8px}
+input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var(--brand)}
+#noresult{color:var(--muted)}
+.repo{margin:0 0 1.6rem}
+.repo>h2{font-size:.82rem;font-weight:600;letter-spacing:.02em;margin:0 0 .5rem;color:var(--muted)}
+.repo>h2 a{color:var(--muted);text-decoration:none}
+.repo>h2 a:hover{color:var(--link)}
+.pkg{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.85rem 1rem;margin:.5rem 0;box-shadow:0 1px 2px var(--shadow)}
+.pkg-head{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}
+.pkg-name{font-size:1.12rem;font-weight:600;color:var(--link);text-decoration:none}
+.pkg-name:hover{text-decoration:underline}
+.pkg-latest{font-size:.78rem;color:var(--brand);font-weight:600}
+.pkg-desc{margin:.3rem 0 .35rem;color:var(--fg)}
+.pkg-meta{font-size:.8rem;color:var(--muted);margin:.15rem 0 .5rem}
+.pkg-dep{display:flex;align-items:center;gap:.5rem;margin:.1rem 0 .6rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.3rem .5rem}
+.pkg-dep code{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;color:var(--fg);white-space:nowrap;overflow-x:auto}
+.pkg-dep .copy{flex:0 0 auto;font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:5px;padding:.1rem .55rem;cursor:pointer}
+.pkg-dep .copy:hover{border-color:var(--brand);color:var(--brand)}
+.versions{display:flex;flex-wrap:wrap;gap:.4rem}
+.versions a{font-size:.76rem;color:var(--muted);text-decoration:none;border:1px solid var(--border);border-radius:999px;padding:.12rem .6rem}
+.versions a:hover{border-color:var(--brand);color:var(--brand)}
+.hidden{display:none}
+</style>
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-NXW2P6CCF3"></script>
+<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag('js',new Date());gtag('config','G-NXW2P6CCF3');</script>
+</head>
+<body>
+<header class="hero"><h1><span class="dot"></span>Veryl registry</h1><p class="tagline">Published Veryl projects and their generated documentation.</p></header>
+<input id="q" type="search" placeholder="Search packages…" autocomplete="off">
+<p id="noresult" class="hidden">No matching packages.</p>
+<main>
+<p id="empty">No projects yet.</p>
+</main>
+<script>
+const q=document.getElementById('q');
+const pkgs=[...document.querySelectorAll('.pkg')];
+const repos=[...document.querySelectorAll('.repo')];
+const noresult=document.getElementById('noresult');
+function filter(){
+const t=q.value.trim().toLowerCase();let any=false;
+for(const p of pkgs){const show=!t||p.dataset.search.includes(t);p.classList.toggle('hidden',!show);if(show)any=true;}
+for(const r of repos){r.classList.toggle('hidden',!r.querySelector('.pkg:not(.hidden)'));}
+if(noresult)noresult.classList.toggle('hidden',any||!t);
+}
+q.addEventListener('input',filter);
+document.querySelectorAll('.copy').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.previousElementSibling.textContent).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy';},1200);});});});
+</script>
+</body>
+</html>
