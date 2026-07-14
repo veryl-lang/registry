@@ -47,7 +47,7 @@ async fn dispatch(env: &Env, submission: &Submission) -> Result<()> {
         "client_payload": submission,
     });
 
-    let mut headers = Headers::new();
+    let headers = Headers::new();
     headers.set("Authorization", &format!("Bearer {token}"))?;
     headers.set("Accept", "application/vnd.github+json")?;
     headers.set("User-Agent", "veryl-registry-worker")?;
