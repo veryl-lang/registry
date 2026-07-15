@@ -262,6 +262,7 @@ pub fn run(args: CrawlArgs) -> Result<()> {
                     repo,
                     project: &project.name,
                     version: &release.version,
+                    description: project.description.as_deref(),
                 };
                 match build_doc(
                     &args.veryl,
@@ -386,12 +387,13 @@ fn doc_dest(docs_out: &Path, owner: &str, repo: &str, project: &str, version: &s
     docs_out.join(owner).join(repo).join(project).join(version)
 }
 
-/// Identifies a documented version, for the injected doc toolbar.
+/// Identifies a documented version, for the injected doc toolbar and SEO head.
 struct DocMeta<'a> {
     owner: &'a str,
     repo: &'a str,
     project: &'a str,
     version: &'a str,
+    description: Option<&'a str>,
 }
 
 /// Check out `revision`, run `veryl doc` in `project_dir`, copy the generated
@@ -477,11 +479,66 @@ fn toolbar_html(meta: &DocMeta) -> String {
     )
 }
 
-/// Inject the toolbar (style + bar) into every `*.html` under `dest`.
-/// Best-effort: per-file failures are skipped rather than failing the build.
+/// Appended to each doc page's `<title>` for clearer search results.
+const DOC_TITLE_SUFFIX: &str = " · Veryl registry";
+
+/// schema.org `SoftwareSourceCode` for one documented version, as JSON-LD.
+fn doc_jsonld(meta: &DocMeta, description: &str, page_url: &str, repo_url: &str) -> String {
+    let doc = serde_json::json!({
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": meta.project,
+        "description": description,
+        "version": meta.version,
+        "url": page_url,
+        "codeRepository": repo_url,
+        "programmingLanguage": "Veryl",
+    });
+    let json = serde_json::to_string(&doc)
+        .unwrap_or_default()
+        .replace('<', "\\u003c");
+    format!("<script type=\"application/ld+json\">{json}</script>\n")
+}
+
+/// Chrome for a doc page's `<head>`: toolbar CSS, analytics, and per-page SEO.
+/// `page_url` is this page's own URL, used as its self-canonical.
+fn doc_head(meta: &DocMeta, page_url: &str) -> String {
+    let description = meta
+        .description
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} — Veryl HDL documentation", meta.project));
+    let title = format!("{} {}{DOC_TITLE_SUFFIX}", meta.project, meta.version);
+    let repo_url = format!("https://github.com/{}/{}", meta.owner, meta.repo);
+    let jsonld = doc_jsonld(meta, &description, page_url, &repo_url);
+    format!(
+        "<style>\n{TOOLBAR_CSS}</style>\n{ANALYTICS}\
+         <meta name=\"description\" content=\"{d}\">\n\
+         <link rel=\"canonical\" href=\"{u}\">\n\
+         <link rel=\"icon\" type=\"image/png\" href=\"/favicon.png\">\n\
+         <meta property=\"og:type\" content=\"website\">\n\
+         <meta property=\"og:site_name\" content=\"Veryl registry\">\n\
+         <meta property=\"og:title\" content=\"{t}\">\n\
+         <meta property=\"og:description\" content=\"{d}\">\n\
+         <meta property=\"og:url\" content=\"{u}\">\n\
+         <meta property=\"og:image\" content=\"{SITE_URL}/favicon.png\">\n\
+         <meta name=\"twitter:card\" content=\"summary\">\n\
+         {jsonld}",
+        d = esc(&description),
+        t = esc(&title),
+        u = esc(page_url),
+    )
+}
+
+/// Inject the registry chrome (SEO `<head>` + toolbar bar) into every `*.html`
+/// under `dest`. Best-effort: per-file failures are skipped, not fatal.
 fn inject_toolbar(dest: &Path, meta: &DocMeta) {
-    let head = format!("<style>\n{TOOLBAR_CSS}</style>\n{ANALYTICS}");
     let bar = toolbar_html(meta);
+    let base = format!(
+        "{SITE_URL}/{}/{}/{}/{}/",
+        meta.owner, meta.repo, meta.project, meta.version
+    );
     for entry in WalkDir::new(dest).into_iter().flatten() {
         if entry.path().extension().and_then(|e| e.to_str()) != Some("html") {
             continue;
@@ -489,10 +546,48 @@ fn inject_toolbar(dest: &Path, meta: &DocMeta) {
         let Ok(html) = fs::read_to_string(entry.path()) else {
             continue;
         };
-        let html = html.replacen("</head>", &format!("{head}</head>"), 1);
+        // index.html is served at the version root, other pages at their path.
+        let rel = entry
+            .path()
+            .strip_prefix(dest)
+            .ok()
+            .and_then(|r| r.to_str())
+            .unwrap_or("");
+        let page_url = if rel.is_empty() || rel == "index.html" {
+            base.clone()
+        } else {
+            format!("{base}{rel}")
+        };
+        // Drop mdbook's own (empty) description and favicon so ours win.
+        let html = html.replacen("</title>", &format!("{DOC_TITLE_SUFFIX}</title>"), 1);
+        let html = strip_tag(&html, "name=\"description\"");
+        let html = strip_tag(&html, "rel=\"shortcut icon\"");
+        let html = html.replacen(
+            "</head>",
+            &format!("{}</head>", doc_head(meta, &page_url)),
+            1,
+        );
         let html = insert_after_body_open(&html, &bar);
         let _ = fs::write(entry.path(), html);
     }
+}
+
+/// Remove the first tag whose opening contains `needle`. The head precedes the
+/// body, so the first hit is the head tag we mean to replace; tolerant of
+/// attribute order and content (unlike an exact-string match).
+fn strip_tag(html: &str, needle: &str) -> String {
+    let Some(at) = html.find(needle) else {
+        return html.to_string();
+    };
+    let Some(lt) = html[..at].rfind('<') else {
+        return html.to_string();
+    };
+    let Some(gt) = html[lt..].find('>') else {
+        return html.to_string();
+    };
+    let mut out = html.to_string();
+    out.replace_range(lt..lt + gt + 1, "");
+    out
 }
 
 /// Insert `snippet` immediately after the opening `<body ...>` tag.
@@ -536,8 +631,15 @@ fn doc_chrome_fingerprint() -> String {
         repo: "r",
         project: "p",
         version: "0",
+        description: None,
     };
-    let material = format!("{TOOLBAR_CSS}\u{0}{ANALYTICS}\u{0}{}", toolbar_html(&dummy));
+    // Cover the whole injected chrome (SEO head, toolbar bar, title suffix) so
+    // any template change bumps the stamp and rebuilds already-built doc pages.
+    let material = format!(
+        "{}\u{0}{}\u{0}{DOC_TITLE_SUFFIX}",
+        doc_head(&dummy, "u"),
+        toolbar_html(&dummy),
+    );
     format!("{:016x}", fnv1a(material.as_bytes()))
 }
 
@@ -1082,12 +1184,72 @@ mod tests {
     }
 
     #[test]
+    fn doc_head_has_seo() {
+        let meta = DocMeta {
+            owner: "alice",
+            repo: "fifo",
+            project: "fifo",
+            version: "1.2.0",
+            description: Some("A FIFO core"),
+        };
+        let url = "https://registry.veryl-lang.org/alice/fifo/fifo/1.2.0/";
+        let head = doc_head(&meta, url);
+        assert!(head.contains("<meta name=\"description\" content=\"A FIFO core\">"));
+        assert!(head.contains(&format!("<link rel=\"canonical\" href=\"{url}\">")));
+        assert!(head.contains(&format!("content=\"{url}\""))); // og:url
+        assert!(head.contains("\"@type\":\"SoftwareSourceCode\""));
+        assert!(head.contains("\"version\":\"1.2.0\""));
+
+        // falls back to a generated description when the project has none
+        let none = DocMeta {
+            description: None,
+            ..meta
+        };
+        assert!(doc_head(&none, url).contains("fifo — Veryl HDL documentation"));
+    }
+
+    #[test]
+    fn inject_adds_seo_and_drops_empty_description() {
+        let dir = std::env::temp_dir().join("vlr-inject-seo-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("index.html"),
+            "<html><head><title>fifo</title>\
+             <meta name=\"description\" content=\"\">\
+             <link rel=\"shortcut icon\" href=\"favicon-abc123.png\">\
+             </head><body><p>x</p></body></html>",
+        )
+        .unwrap();
+        let meta = DocMeta {
+            owner: "alice",
+            repo: "fifo",
+            project: "fifo",
+            version: "1.2.0",
+            description: Some("A FIFO"),
+        };
+        inject_toolbar(&dir, &meta);
+        let out = fs::read_to_string(dir.join("index.html")).unwrap();
+        assert!(!out.contains("content=\"\"")); // mdbook's empty description dropped
+        assert!(!out.contains("favicon-abc123.png")); // mdbook's default favicon dropped
+        assert!(out.contains("<meta name=\"description\" content=\"A FIFO\">"));
+        assert!(out.contains("<link rel=\"icon\" type=\"image/png\" href=\"/favicon.png\">"));
+        assert!(out.contains("<title>fifo · Veryl registry</title>"));
+        assert!(out.contains(
+            "rel=\"canonical\" href=\"https://registry.veryl-lang.org/alice/fifo/fifo/1.2.0/\""
+        ));
+        assert!(out.contains("class=\"vlr-bar\"")); // toolbar still injected
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn toolbar_inserts_after_body_and_links_out() {
         let meta = DocMeta {
             owner: "alice",
             repo: "fifo",
             project: "fifo",
             version: "1.2.0",
+            description: None,
         };
         let bar = toolbar_html(&meta);
         assert!(bar.contains("href=\"/\"")); // home = gallery root (absolute)
@@ -1212,6 +1374,7 @@ mod tests {
             repo: "b",
             project: "p",
             version: "1.2.0",
+            description: None,
         };
         let bar = toolbar_html(&meta);
         assert!(bar.contains("<select class=\"vlr-ver\""));
