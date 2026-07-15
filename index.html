@@ -30,6 +30,13 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 .pkg-dep code{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;color:var(--fg);white-space:nowrap;overflow-x:auto}
 .pkg-dep .copy{flex:0 0 auto;font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:5px;padding:.1rem .55rem;cursor:pointer}
 .pkg-dep .copy:hover{border-color:var(--brand);color:var(--brand)}
+.cats{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.55rem}
+.cat{font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.12rem .55rem;cursor:pointer}
+.cat:hover{border-color:var(--brand);color:var(--brand)}
+.catbar{display:flex;flex-wrap:wrap;gap:.4rem;margin:.2rem 0 1rem}
+.catf{font:inherit;font-size:.78rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.2rem .7rem;cursor:pointer}
+.catf:hover{border-color:var(--brand);color:var(--brand)}
+.catf.active{background:var(--brand);border-color:var(--brand);color:#fff}
 .hidden{display:none}
 </style>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-NXW2P6CCF3"></script>
@@ -41,7 +48,7 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 <p id="noresult" class="hidden">No matching packages.</p>
 <main>
 <section class="repo"><h2><a href="https://github.com/veryl-lang/vip">veryl-lang/vip</a></h2>
-<div class="pkg" data-search="vip veryl-lang/vip verification ip for veryl mit or apache-2.0 ">
+<div class="pkg" data-search="vip veryl-lang/vip verification ip for veryl mit or apache-2.0  " data-cats="">
 <div class="pkg-head"><a class="pkg-name" href="veryl-lang/vip/vip/0.1.0/">vip</a><span class="pkg-latest">v0.1.0</span></div>
 <p class="pkg-desc">Verification IP for Veryl</p>
 <p class="pkg-meta">MIT OR Apache-2.0 · updated 2026-07-14</p>
@@ -54,13 +61,20 @@ const q=document.getElementById('q');
 const pkgs=[...document.querySelectorAll('.pkg')];
 const repos=[...document.querySelectorAll('.repo')];
 const noresult=document.getElementById('noresult');
+let cat='';
 function filter(){
 const t=q.value.trim().toLowerCase();let any=false;
-for(const p of pkgs){const show=!t||p.dataset.search.includes(t);p.classList.toggle('hidden',!show);if(show)any=true;}
-for(const r of repos){r.classList.toggle('hidden',!r.querySelector('.pkg:not(.hidden)'));}
-if(noresult)noresult.classList.toggle('hidden',any||!t);
+for(const p of pkgs){
+const okText=!t||p.dataset.search.includes(t);
+const okCat=!cat||(' '+p.dataset.cats+' ').includes(' '+cat+' ');
+const show=okText&&okCat;p.classList.toggle('hidden',!show);if(show)any=true;
 }
+for(const r of repos){r.classList.toggle('hidden',!r.querySelector('.pkg:not(.hidden)'));}
+if(noresult)noresult.classList.toggle('hidden',any||(!t&&!cat));
+}
+function selectCat(c){cat=c;document.querySelectorAll('.catf').forEach(function(x){x.classList.toggle('active',x.dataset.cat===c);});filter();}
 q.addEventListener('input',filter);
+document.querySelectorAll('.catf,.cat').forEach(function(b){b.addEventListener('click',function(){selectCat(b.dataset.cat);});});
 document.querySelectorAll('.copy').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.previousElementSibling.textContent).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy';},1200);});});});
 </script>
 </body>
