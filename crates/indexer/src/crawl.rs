@@ -157,6 +157,40 @@ fn categories_json() -> String {
     serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// `sitemap.xml` for the gallery home and every documented version. Path
+/// segments are charset-validated upstream, so no XML escaping is needed.
+fn sitemap_xml(projects: &[GalleryProject]) -> String {
+    let mut urls = format!("  <url><loc>{SITE_URL}/</loc></url>\n");
+    for p in projects {
+        let slug = p.repo.strip_prefix("github.com/").unwrap_or(&p.repo);
+        // `updated` is the latest release's date, so only the newest version can
+        // honestly carry it as <lastmod>.
+        let latest_mod = p
+            .updated
+            .as_deref()
+            .map(|d| format!("<lastmod>{d}</lastmod>"))
+            .unwrap_or_default();
+        let mut versions = p.versions.clone();
+        sort_versions_desc(&mut versions);
+        for (i, v) in versions.iter().enumerate() {
+            let lastmod = if i == 0 { latest_mod.as_str() } else { "" };
+            urls.push_str(&format!(
+                "  <url><loc>{SITE_URL}/{slug}/{}/{v}/</loc>{lastmod}</url>\n",
+                p.project
+            ));
+        }
+    }
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n\
+         {urls}</urlset>\n"
+    )
+}
+
+fn robots_txt() -> String {
+    format!("User-agent: *\nAllow: /\nSitemap: {SITE_URL}/sitemap.xml\n")
+}
+
 pub fn run(args: CrawlArgs) -> Result<()> {
     let registry_dir = args.index_root.join("registry");
     // Fingerprint of the injected doc-page chrome (toolbar + analytics + CSS).
@@ -286,6 +320,9 @@ pub fn run(args: CrawlArgs) -> Result<()> {
     fs::write(args.docs_out.join("categories.json"), categories_json())
         .context("writing categories.json")?;
     fs::write(args.docs_out.join("favicon.png"), FAVICON).context("writing favicon.png")?;
+    fs::write(args.docs_out.join("sitemap.xml"), sitemap_xml(&gallery))
+        .context("writing sitemap.xml")?;
+    fs::write(args.docs_out.join("robots.txt"), robots_txt()).context("writing robots.txt")?;
     println!("published {} documented project(s)", gallery.len());
     Ok(())
 }
@@ -1017,6 +1054,31 @@ mod tests {
         assert!(html.contains("\"@type\":\"SoftwareSourceCode\""));
         assert!(html.contains("\"codeRepository\":\"https://github.com/alice/fifo\""));
         assert!(html.contains("registry.veryl-lang.org/alice/fifo/fifo/1.2.0/"));
+    }
+
+    #[test]
+    fn sitemap_and_robots() {
+        let g = vec![GalleryProject {
+            repo: "github.com/alice/fifo".into(),
+            project: "fifo".into(),
+            description: None,
+            license: None,
+            authors: vec![],
+            categories: vec![],
+            updated: Some("2026-07-15".into()),
+            versions: vec!["1.0.0".into(), "1.2.0".into()],
+        }];
+        let sm = sitemap_xml(&g);
+        assert!(sm.contains("<loc>https://registry.veryl-lang.org/</loc>"));
+        // lastmod only on the latest version (1.2.0); older 1.0.0 carries none
+        assert!(sm.contains(
+            "<loc>https://registry.veryl-lang.org/alice/fifo/fifo/1.2.0/</loc><lastmod>2026-07-15</lastmod></url>"
+        ));
+        assert!(
+            sm.contains("<loc>https://registry.veryl-lang.org/alice/fifo/fifo/1.0.0/</loc></url>")
+        );
+
+        assert!(robots_txt().contains("Sitemap: https://registry.veryl-lang.org/sitemap.xml"));
     }
 
     #[test]
