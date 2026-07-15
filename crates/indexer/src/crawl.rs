@@ -105,6 +105,15 @@ struct ProjectMeta {
 
 const META_FILE: &str = "registry-meta.json";
 
+/// Canonical public origin, without a trailing slash.
+const SITE_URL: &str = "https://registry.veryl-lang.org";
+
+/// Meta description / social-card summary for the gallery home page.
+const GALLERY_DESC: &str = "Browse published Veryl HDL projects and their generated documentation.";
+
+/// Site favicon (the Veryl logo), published at the site root.
+const FAVICON: &[u8] = include_bytes!("assets/favicon.png");
+
 /// The controlled category vocabulary; anything outside it is dropped.
 const CATEGORIES: &[(&str, &str)] = &[
     ("processor", "Processor"),
@@ -276,6 +285,7 @@ pub fn run(args: CrawlArgs) -> Result<()> {
     // categories this registry does not recognize before submitting.
     fs::write(args.docs_out.join("categories.json"), categories_json())
         .context("writing categories.json")?;
+    fs::write(args.docs_out.join("favicon.png"), FAVICON).context("writing favicon.png")?;
     println!("published {} documented project(s)", gallery.len());
     Ok(())
 }
@@ -696,8 +706,22 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { "Veryl registry" }
+                meta name="description" content=(GALLERY_DESC);
+                link rel="canonical" href=(format!("{SITE_URL}/"));
+                link rel="icon" type="image/png" href="/favicon.png";
+                meta property="og:type" content="website";
+                meta property="og:site_name" content="Veryl registry";
+                meta property="og:title" content="Veryl registry";
+                meta property="og:description" content=(GALLERY_DESC);
+                meta property="og:url" content=(format!("{SITE_URL}/"));
+                meta property="og:image" content=(format!("{SITE_URL}/favicon.png"));
+                meta name="twitter:card" content="summary";
+                meta name="twitter:title" content="Veryl registry";
+                meta name="twitter:description" content=(GALLERY_DESC);
+                meta name="twitter:image" content=(format!("{SITE_URL}/favicon.png"));
                 style { (PreEscaped(GALLERY_CSS)) }
                 (PreEscaped(ANALYTICS))
+                (gallery_jsonld(projects))
             }
             body {
                 header.hero {
@@ -731,6 +755,45 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
         }
     };
     markup.into_string()
+}
+
+/// schema.org `ItemList` of the documented projects, embedded as JSON-LD for
+/// rich search results. `<` is escaped so a description cannot close the script.
+fn gallery_jsonld(projects: &[GalleryProject]) -> Markup {
+    let items: Vec<serde_json::Value> = projects
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let slug = p.repo.strip_prefix("github.com/").unwrap_or(&p.repo);
+            let mut versions = p.versions.clone();
+            sort_versions_desc(&mut versions);
+            let latest = versions.first().cloned().unwrap_or_default();
+            serde_json::json!({
+                "@type": "ListItem",
+                "position": i + 1,
+                "item": {
+                    "@type": "SoftwareSourceCode",
+                    "name": p.project,
+                    "description": p.description.clone().unwrap_or_default(),
+                    "url": format!("{SITE_URL}/{slug}/{}/{latest}/", p.project),
+                    "codeRepository": format!("https://{}", p.repo),
+                    "programmingLanguage": "Veryl",
+                }
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "name": "Veryl registry",
+        "itemListElement": items,
+    });
+    let json = serde_json::to_string(&doc)
+        .unwrap_or_default()
+        .replace('<', "\\u003c");
+    html! {
+        script type="application/ld+json" { (PreEscaped(json)) }
+    }
 }
 
 /// One gallery card for a documented project.
@@ -929,6 +992,31 @@ mod tests {
     fn gallery_includes_analytics() {
         let html = gallery_html(&[]);
         assert!(html.contains("G-NXW2P6CCF3")); // GA4 (same as veryl-lang.org)
+    }
+
+    #[test]
+    fn gallery_has_seo_metadata_and_jsonld() {
+        let g = vec![GalleryProject {
+            repo: "github.com/alice/fifo".into(),
+            project: "fifo".into(),
+            description: Some("A FIFO".into()),
+            license: None,
+            authors: vec![],
+            categories: vec![],
+            updated: None,
+            versions: vec!["1.2.0".into()],
+        }];
+        let html = gallery_html(&g);
+        assert!(html.contains("<meta name=\"description\""));
+        assert!(html.contains("rel=\"canonical\" href=\"https://registry.veryl-lang.org/\""));
+        assert!(html.contains("rel=\"icon\" type=\"image/png\" href=\"/favicon.png\""));
+        assert!(html.contains("property=\"og:title\""));
+        assert!(html.contains("name=\"twitter:card\""));
+        // JSON-LD ItemList carrying the project as SoftwareSourceCode
+        assert!(html.contains("application/ld+json"));
+        assert!(html.contains("\"@type\":\"SoftwareSourceCode\""));
+        assert!(html.contains("\"codeRepository\":\"https://github.com/alice/fifo\""));
+        assert!(html.contains("registry.veryl-lang.org/alice/fifo/fifo/1.2.0/"));
     }
 
     #[test]
