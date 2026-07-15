@@ -9,6 +9,7 @@
 use crate::model::{self, Entry};
 use anyhow::{Context, Result};
 use clap::Parser;
+use maud::{DOCTYPE, Markup, PreEscaped, html};
 use registry_common::{is_valid_project_name, is_valid_segment, is_valid_version};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -670,64 +671,10 @@ const ANALYTICS: &str = "\
 
 // Palette and typography mirror veryl-lang.org (Fira Sans, brand green #2baa59,
 // orange links #d46e13, warm off-white ground), with a dark-scheme variant.
-const GALLERY_CSS: &str = "\
-:root{--bg:#fcfaf6;--fg:#24262a;--muted:#5f6b7a;--link:#d46e13;--brand:#2baa59;--border:#e4e7ec;--card:#fff;--shadow:rgba(228,231,236,.6)}\n\
-@media (prefers-color-scheme:dark){:root{--bg:#161a17;--fg:#e6e8eb;--muted:#9aa3ad;--link:#5fd28a;--brand:#5fd28a;--border:#2a2f34;--card:#1e2621;--shadow:rgba(0,0,0,.3)}}\n\
-*{box-sizing:border-box}\n\
-body{font-family:\"Fira Sans\",system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--bg);max-width:56rem;margin:0 auto;padding:2.2rem 1.25rem 4rem;line-height:1.6}\n\
-.hero h1{font-size:1.9rem;margin:0;display:flex;align-items:center;gap:.55rem;font-weight:700}\n\
-.hero .dot{width:.85rem;height:.85rem;border-radius:50%;background:var(--brand)}\n\
-.hero .tagline{color:var(--muted);margin:.35rem 0 0}\n\
-input#q{width:100%;padding:.6rem .8rem;margin:1.5rem 0 1.6rem;font:inherit;font-size:1rem;color:var(--fg);background:var(--card);border:1px solid var(--border);border-radius:8px}\n\
-input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var(--brand)}\n\
-#noresult{color:var(--muted)}\n\
-.repo{margin:0 0 1.6rem}\n\
-.repo>h2{font-size:.82rem;font-weight:600;letter-spacing:.02em;margin:0 0 .5rem;color:var(--muted)}\n\
-.repo>h2 a{color:var(--muted);text-decoration:none}\n\
-.repo>h2 a:hover{color:var(--link)}\n\
-.pkg{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.85rem 1rem;margin:.5rem 0;box-shadow:0 1px 2px var(--shadow)}\n\
-.pkg-head{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}\n\
-.pkg-name{font-size:1.12rem;font-weight:600;color:var(--link);text-decoration:none}\n\
-.pkg-name:hover{text-decoration:underline}\n\
-.pkg-latest{font-size:.78rem;color:var(--brand);font-weight:600}\n\
-.pkg-desc{margin:.3rem 0 .35rem;color:var(--fg)}\n\
-.pkg-meta{font-size:.8rem;color:var(--muted);margin:.15rem 0 .5rem}\n\
-.pkg-dep{display:flex;align-items:center;gap:.5rem;margin:.1rem 0 .6rem;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.3rem .5rem}\n\
-.pkg-dep code{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;color:var(--fg);white-space:nowrap;overflow-x:auto}\n\
-.pkg-dep .copy{flex:0 0 auto;font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:5px;padding:.1rem .55rem;cursor:pointer}\n\
-.pkg-dep .copy:hover{border-color:var(--brand);color:var(--brand)}\n\
-.cats{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.55rem}\n\
-.cat{font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.12rem .55rem;cursor:pointer}\n\
-.cat:hover{border-color:var(--brand);color:var(--brand)}\n\
-.catbar{display:flex;flex-wrap:wrap;gap:.4rem;margin:.2rem 0 1rem}\n\
-.catf{font:inherit;font-size:.78rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.2rem .7rem;cursor:pointer}\n\
-.catf:hover{border-color:var(--brand);color:var(--brand)}\n\
-.catf.active{background:var(--brand);border-color:var(--brand);color:#fff}\n\
-.catf:disabled{opacity:.4;cursor:default}\n\
-.catf:disabled:hover{border-color:var(--border);color:var(--muted)}\n\
-.hidden{display:none}\n";
+const GALLERY_CSS: &str = include_str!("assets/gallery.css");
 
 // Client-side package search: no backend, filters the rendered list in place.
-const GALLERY_SCRIPT: &str = "\
-const q=document.getElementById('q');\n\
-const pkgs=[...document.querySelectorAll('.pkg')];\n\
-const repos=[...document.querySelectorAll('.repo')];\n\
-const noresult=document.getElementById('noresult');\n\
-let cat='';\n\
-function filter(){\n\
-  const t=q.value.trim().toLowerCase();let any=false;\n\
-  for(const p of pkgs){\n\
-    const okText=!t||p.dataset.search.includes(t);\n\
-    const okCat=!cat||(' '+p.dataset.cats+' ').includes(' '+cat+' ');\n\
-    const show=okText&&okCat;p.classList.toggle('hidden',!show);if(show)any=true;\n\
-  }\n\
-  for(const r of repos){r.classList.toggle('hidden',!r.querySelector('.pkg:not(.hidden)'));}\n\
-  if(noresult)noresult.classList.toggle('hidden',any||(!t&&!cat));\n\
-}\n\
-function selectCat(c){cat=c;document.querySelectorAll('.catf').forEach(function(x){x.classList.toggle('active',x.dataset.cat===c);});filter();}\n\
-q.addEventListener('input',filter);\n\
-document.querySelectorAll('.catf,.cat').forEach(function(b){b.addEventListener('click',function(){selectCat(b.dataset.cat);});});\n\
-document.querySelectorAll('.copy').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.previousElementSibling.textContent).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy';},1200);});});});\n";
+const GALLERY_SCRIPT: &str = include_str!("assets/gallery.js");
 
 fn gallery_html(projects: &[GalleryProject]) -> String {
     let mut by_repo: BTreeMap<&str, Vec<&GalleryProject>> = BTreeMap::new();
@@ -735,141 +682,124 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
         by_repo.entry(p.repo.as_str()).or_default().push(p);
     }
 
-    // Slugs that at least one project uses; the facet bar shows the whole
-    // vocabulary but only these are interactive filters.
+    // The facet bar shows the whole vocabulary; only slugs a project uses are
+    // interactive filters.
     let in_use: HashSet<&str> = projects
         .iter()
         .flat_map(|p| p.categories.iter().map(String::as_str))
         .collect();
 
-    let mut body = String::new();
-    for (repo, projs) in &by_repo {
-        let slug = repo.strip_prefix("github.com/").unwrap_or(repo);
-        body.push_str(&format!(
-            "<section class=\"repo\"><h2><a href=\"https://{}\">{}</a></h2>\n",
-            esc(repo),
-            esc(slug)
-        ));
-        for p in projs {
-            let mut versions = p.versions.clone();
-            sort_versions_desc(&mut versions);
-            let latest = versions.first().cloned().unwrap_or_default();
-            let cat_search = p
-                .categories
-                .iter()
-                .map(|c| format!("{} {}", c, category_display(c)))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let haystack = format!(
-                "{} {} {} {} {} {}",
-                p.project,
-                slug,
-                p.description.as_deref().unwrap_or(""),
-                p.license.as_deref().unwrap_or(""),
-                p.authors.join(" "),
-                cat_search,
-            )
-            .to_lowercase();
-            body.push_str(&format!(
-                "<div class=\"pkg\" data-search=\"{}\" data-cats=\"{}\">\n",
-                esc(&haystack),
-                esc(&p.categories.join(" "))
-            ));
-            body.push_str(&format!(
-                "<div class=\"pkg-head\"><a class=\"pkg-name\" href=\"{s}/{p}/{l}/\">{p}</a><span class=\"pkg-latest\">v{l}</span></div>\n",
-                s = esc(slug),
-                p = esc(&p.project),
-                l = esc(&latest)
-            ));
-            if let Some(desc) = p.description.as_deref().filter(|d| !d.trim().is_empty()) {
-                body.push_str(&format!("<p class=\"pkg-desc\">{}</p>\n", esc(desc)));
+    let markup = html! {
+        (DOCTYPE)
+        html lang="en" {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { "Veryl registry" }
+                style { (PreEscaped(GALLERY_CSS)) }
+                (PreEscaped(ANALYTICS))
             }
-            let mut meta_parts: Vec<String> = Vec::new();
-            if let Some(lic) = p.license.as_deref().filter(|s| !s.trim().is_empty()) {
-                meta_parts.push(esc(lic));
-            }
-            if let Some(up) = p.updated.as_deref().filter(|s| !s.trim().is_empty()) {
-                meta_parts.push(format!("updated {}", esc(up)));
-            }
-            if !p.authors.is_empty() {
-                meta_parts.push(esc(&p.authors.join(", ")));
-            }
-            if !meta_parts.is_empty() {
-                body.push_str(&format!(
-                    "<p class=\"pkg-meta\">{}</p>\n",
-                    meta_parts.join(" · ")
-                ));
-            }
-            // Copy-pasteable `[dependencies]` entry (key = project name; the
-            // resolver finds the project by name inside the repo).
-            let dep = format!(
-                "{} = {{ github = \"{slug}\", version = \"{latest}\" }}",
-                p.project
-            );
-            body.push_str(&format!(
-                "<div class=\"pkg-dep\"><code>{}</code><button class=\"copy\">Copy</button></div>\n",
-                esc(&dep)
-            ));
-            // Per-version links live in the doc toolbar's dropdown, not the card.
-            if !p.categories.is_empty() {
-                body.push_str("<div class=\"cats\">\n");
-                for c in &p.categories {
-                    body.push_str(&format!(
-                        "<button class=\"cat\" data-cat=\"{}\">{}</button>\n",
-                        esc(c),
-                        esc(category_display(c))
-                    ));
+            body {
+                header.hero {
+                    h1 { span.dot {} "Veryl registry" }
+                    p.tagline { "Published Veryl projects and their generated documentation." }
                 }
-                body.push_str("</div>\n");
+                input #q type="search" placeholder="Search packages…" autocomplete="off";
+                div.catbar {
+                    button.catf.active data-cat="" { "All" }
+                    @for &(slug, disp) in CATEGORIES {
+                        button.catf data-cat=(slug) disabled[!in_use.contains(slug)] { (disp) }
+                    }
+                }
+                p #noresult.hidden { "No matching packages." }
+                main {
+                    @for (repo, projs) in &by_repo {
+                        @let slug = repo.strip_prefix("github.com/").unwrap_or(repo);
+                        section.repo {
+                            h2 { a href=(format!("https://{repo}")) { (slug) } }
+                            @for p in projs {
+                                (project_card(p, slug))
+                            }
+                        }
+                    }
+                    @if by_repo.is_empty() {
+                        p #empty { "No projects yet." }
+                    }
+                }
+                script { (PreEscaped(GALLERY_SCRIPT)) }
             }
-            body.push_str("</div>\n");
         }
-        body.push_str("</section>\n");
+    };
+    markup.into_string()
+}
+
+/// One gallery card for a documented project.
+fn project_card(p: &GalleryProject, slug: &str) -> Markup {
+    let mut versions = p.versions.clone();
+    sort_versions_desc(&mut versions);
+    let latest = versions.first().cloned().unwrap_or_default();
+
+    let cat_search = p
+        .categories
+        .iter()
+        .map(|c| format!("{} {}", c, category_display(c)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let haystack = format!(
+        "{} {} {} {} {} {}",
+        p.project,
+        slug,
+        p.description.as_deref().unwrap_or(""),
+        p.license.as_deref().unwrap_or(""),
+        p.authors.join(" "),
+        cat_search,
+    )
+    .to_lowercase();
+
+    let mut meta_parts: Vec<String> = Vec::new();
+    if let Some(lic) = p.license.as_deref().filter(|s| !s.trim().is_empty()) {
+        meta_parts.push(lic.to_string());
+    }
+    if let Some(up) = p.updated.as_deref().filter(|s| !s.trim().is_empty()) {
+        meta_parts.push(format!("updated {up}"));
+    }
+    if !p.authors.is_empty() {
+        meta_parts.push(p.authors.join(", "));
     }
 
-    if by_repo.is_empty() {
-        body.push_str("<p id=\"empty\">No projects yet.</p>\n");
-    }
+    // Copy-pasteable `[dependencies]` entry (key = project name; the resolver
+    // finds the project by name inside the repo).
+    let dep = format!(
+        "{} = {{ github = \"{slug}\", version = \"{latest}\" }}",
+        p.project
+    );
+    let href = format!("{slug}/{}/{latest}/", p.project);
 
-    let mut html = String::new();
-    html.push_str(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>Veryl registry</title>\n<style>\n",
-    );
-    html.push_str(GALLERY_CSS);
-    html.push_str("</style>\n");
-    html.push_str(ANALYTICS);
-    html.push_str("</head>\n<body>\n");
-    html.push_str(
-        "<header class=\"hero\"><h1><span class=\"dot\"></span>Veryl registry</h1>\
-         <p class=\"tagline\">Published Veryl projects and their generated documentation.</p></header>\n",
-    );
-    html.push_str(
-        "<input id=\"q\" type=\"search\" placeholder=\"Search packages…\" autocomplete=\"off\">\n",
-    );
-    html.push_str(
-        "<div class=\"catbar\"><button class=\"catf active\" data-cat=\"\">All</button>\n",
-    );
-    for &(slug, disp) in CATEGORIES {
-        // Categories no project uses yet are shown as the vocabulary but are not
-        // interactive filters (they would only ever match nothing).
-        let disabled = if in_use.contains(slug) { "" } else { " disabled" };
-        html.push_str(&format!(
-            "<button class=\"catf\" data-cat=\"{}\"{}>{}</button>\n",
-            esc(slug),
-            disabled,
-            esc(disp)
-        ));
+    html! {
+        div.pkg data-search=(haystack) data-cats=(p.categories.join(" ")) {
+            div.pkg-head {
+                a.pkg-name href=(href) { (p.project) }
+                span.pkg-latest { "v" (latest) }
+            }
+            @if let Some(desc) = p.description.as_deref().filter(|d| !d.trim().is_empty()) {
+                p.pkg-desc { (desc) }
+            }
+            @if !meta_parts.is_empty() {
+                p.pkg-meta { (meta_parts.join(" · ")) }
+            }
+            div.pkg-dep {
+                code { (dep) }
+                button.copy { "Copy" }
+            }
+            @if !p.categories.is_empty() {
+                div.cats {
+                    @for c in &p.categories {
+                        button.cat data-cat=(c) { (category_display(c)) }
+                    }
+                }
+            }
+        }
     }
-    html.push_str("</div>\n");
-    html.push_str("<p id=\"noresult\" class=\"hidden\">No matching packages.</p>\n");
-    html.push_str("<main>\n");
-    html.push_str(&body);
-    html.push_str("</main>\n<script>\n");
-    html.push_str(GALLERY_SCRIPT);
-    html.push_str("</script>\n</body>\n</html>\n");
-    html
 }
 
 fn sort_versions_desc(versions: &mut [String]) {
