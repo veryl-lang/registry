@@ -137,6 +137,16 @@ fn category_display(slug: &str) -> &str {
         .map_or(slug, |(_, d)| d)
 }
 
+/// The controlled vocabulary as a JSON array of `{slug, display}`, published at
+/// the site root so clients can validate categories against it.
+fn categories_json() -> String {
+    let items: Vec<_> = CATEGORIES
+        .iter()
+        .map(|(slug, display)| serde_json::json!({ "slug": slug, "display": display }))
+        .collect();
+    serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string())
+}
+
 pub fn run(args: CrawlArgs) -> Result<()> {
     let registry_dir = args.index_root.join("registry");
     // Fingerprint of the injected doc-page chrome (toolbar + analytics + CSS).
@@ -261,6 +271,10 @@ pub fn run(args: CrawlArgs) -> Result<()> {
     let gallery = scan_docs(&args.docs_out);
     fs::write(args.docs_out.join("index.html"), gallery_html(&gallery))
         .context("writing gallery index.html")?;
+    // Publish the vocabulary so clients (e.g. `veryl register`) can warn about
+    // categories this registry does not recognize before submitting.
+    fs::write(args.docs_out.join("categories.json"), categories_json())
+        .context("writing categories.json")?;
     println!("published {} documented project(s)", gallery.len());
     Ok(())
 }
@@ -1136,5 +1150,16 @@ mod tests {
         assert_eq!(got, vec!["processor".to_string(), "memory".to_string()]);
         assert!(normalize_categories(&["not-a-category".into()]).is_empty());
         assert_eq!(category_display("memory"), "Memory");
+    }
+
+    #[test]
+    fn categories_json_lists_every_slug() {
+        let parsed: Vec<serde_json::Value> =
+            serde_json::from_str(&categories_json()).expect("valid JSON");
+        assert_eq!(parsed.len(), CATEGORIES.len());
+        for ((slug, display), got) in CATEGORIES.iter().zip(&parsed) {
+            assert_eq!(got["slug"], *slug);
+            assert_eq!(got["display"], *display);
+        }
     }
 }
