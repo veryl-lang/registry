@@ -34,7 +34,7 @@ jobs:
         if: steps.apply.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          branch: submit/${{ steps.apply.outputs.slug }}
+          branch: submit/${{ steps.apply.outputs.branch }}
           add-paths: registry/**
           commit-message: "Register ${{ steps.apply.outputs.slug }}"
           title: "Register ${{ steps.apply.outputs.slug }} (${{ steps.apply.outputs.status }})"

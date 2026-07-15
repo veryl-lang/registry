@@ -61,20 +61,28 @@ fn main() -> Result<()> {
 }
 
 fn apply(args: ApplyArgs) -> Result<()> {
-    let submission = read_submission(&args)?;
+    let mut submission = read_submission(&args)?;
     submission
         .validate()
         .map_err(|e| anyhow!("invalid submission: {e}"))?;
-    let (owner, repo) = submission
-        .owner_repo()
+    // The CLI lowercases the host, but a direct API post or hand-edit may not;
+    // canonicalize so a case variant can't double-register the same repo.
+    submission.repo = registry_common::canonical_repo(&submission.repo);
+    let (host, segments) = submission
+        .parts()
         .ok_or_else(|| anyhow!("malformed repo: {}", submission.repo))?;
-    let slug = format!("{owner}/{repo}");
+    // Flatten `/` to `__` for a ref-safe branch (a slashed ref would D/F-conflict).
+    // Stable per repo, so re-registration updates the same PR; a collision needs
+    // pathological `_`-adjacent paths.
+    let slug = submission.repo.clone();
+    let branch = slug.replace('/', "__");
 
     // Verify by clone. A failure to clone or find a published project is not
     // fatal; it just means the entry stays/becomes `pending`.
     let clone_dir = std::env::temp_dir()
         .join("veryl-registry-verify")
-        .join(format!("{owner}__{repo}"));
+        .join(host)
+        .join(segments.join("__"));
     let _ = fs::remove_dir_all(&clone_dir);
     let verify = if clone_repo(&submission.repo, &clone_dir) {
         inspect_repo(&clone_dir, &submission.name)
@@ -87,6 +95,7 @@ fn apply(args: ApplyArgs) -> Result<()> {
     // project whose author committed `[publish] register = false`.
     if verify.opted_out {
         github_output("slug", &slug);
+        github_output("branch", &branch);
         github_output("status", "opted-out");
         github_output("changed", "false");
         github_summary(&format!(
@@ -96,7 +105,7 @@ fn apply(args: ApplyArgs) -> Result<()> {
         return Ok(());
     }
 
-    let path = entry_path(&args.index_root, owner, repo);
+    let path = entry_path(&args.index_root, host, &segments);
     let existing = load_existing(&path);
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let entry = build_entry(&submission, existing.as_ref(), &verify, &now);
@@ -115,6 +124,7 @@ fn apply(args: ApplyArgs) -> Result<()> {
     }
 
     github_output("slug", &slug);
+    github_output("branch", &branch);
     github_output("status", &entry.status);
     github_output("changed", &changed.to_string());
     github_summary(&format!(
@@ -188,11 +198,15 @@ fn material_changed(prev: Option<&Entry>, entry: &Entry) -> bool {
     }
 }
 
-fn entry_path(index_root: &Path, owner: &str, repo: &str) -> PathBuf {
-    index_root
-        .join("registry")
-        .join(owner)
-        .join(format!("{repo}.json"))
+/// On-disk entry path `registry/<host>/<seg1>/.../<lastseg>.json`. Every segment
+/// was whitelisted by `validate_repo`, so none can escape `registry/`.
+fn entry_path(index_root: &Path, host: &str, segments: &[&str]) -> PathBuf {
+    let (last, rest) = segments.split_last().expect("validated: >= 2 segments");
+    let mut path = index_root.join("registry").join(host);
+    for seg in rest {
+        path = path.join(seg);
+    }
+    path.join(format!("{last}.json"))
 }
 
 fn load_existing(path: &Path) -> Option<Entry> {
@@ -466,5 +480,18 @@ mod tests {
         assert!(material_changed(Some(&prev), &entry));
         // A brand-new entry (no prior) always counts as changed.
         assert!(material_changed(None, &entry));
+    }
+
+    #[test]
+    fn entry_path_nests_host_and_all_segments() {
+        let root = Path::new("/idx");
+        assert_eq!(
+            entry_path(root, "github.com", &["alice", "fifo"]),
+            root.join("registry/github.com/alice/fifo.json")
+        );
+        assert_eq!(
+            entry_path(root, "gitlab.com", &["group", "sub", "proj"]),
+            root.join("registry/gitlab.com/group/sub/proj.json")
+        );
     }
 }

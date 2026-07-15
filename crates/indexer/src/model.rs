@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-/// An entry file `registry/<owner>/<repo>.json`. Mirrors `schema/entry.schema.json`.
+/// An entry file `registry/<host>/<path>.json` (the path nests for GitLab subgroups).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub repo: String,

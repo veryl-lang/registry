@@ -10,8 +10,11 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 #noresult{color:var(--muted)}
 .repo{margin:0 0 1.6rem}
 .repo>h2{font-size:.82rem;font-weight:600;letter-spacing:.02em;margin:0 0 .5rem;color:var(--muted)}
-.repo>h2 a{color:var(--muted);text-decoration:none}
+.repo>h2 a{color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:.4rem}
 .repo>h2 a:hover{color:var(--link)}
+.repo-host{display:inline-flex;color:var(--muted)}
+.repo-host svg{display:block}
+.repo>h2 a:hover .repo-host{color:var(--link)}
 .pkg{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:.85rem 1rem;margin:.5rem 0;box-shadow:0 1px 2px var(--shadow)}
 .pkg-head{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}
 .pkg-name{font-size:1.12rem;font-weight:600;color:var(--link);text-decoration:none}

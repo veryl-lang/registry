@@ -1,8 +1,8 @@
 //! Crawl the index, build docs for each published version, and generate the
 //! gallery. Intended to run on a schedule in GitHub Actions.
 //!
-//! Docs are immutable per `(owner/repo, project, version)` and land under
-//! `<docs_out>/<owner>/<repo>/<project>/<version>/`. Already-built versions are
+//! Docs are immutable per `(<host>/<path>, project, version)` and land under
+//! `<docs_out>/<host>/<path>/<project>/<version>/`. Already-built versions are
 //! skipped, so pointing `--docs-out` at a persisted checkout (e.g. `gh-pages`)
 //! makes crawling incremental.
 
@@ -10,7 +10,7 @@ use crate::model::{self, Entry};
 use anyhow::{Context, Result};
 use clap::Parser;
 use maud::{DOCTYPE, Markup, PreEscaped, html};
-use registry_common::{is_valid_project_name, is_valid_segment, is_valid_version};
+use registry_common::{is_valid_project_name, is_valid_version, split_key};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -84,7 +84,7 @@ struct GalleryProject {
     versions: Vec<String>,
 }
 
-/// Sidecar persisted at `<docs_out>/<owner>/<repo>/<project>/registry-meta.json`
+/// Sidecar persisted at `<docs_out>/<host>/<path>/<project>/registry-meta.json`
 /// so the gallery (derived from the docs tree) keeps metadata across runs.
 #[derive(Serialize, Deserialize, Default)]
 struct ProjectMeta {
@@ -162,7 +162,6 @@ fn categories_json() -> String {
 fn sitemap_xml(projects: &[GalleryProject]) -> String {
     let mut urls = format!("  <url><loc>{SITE_URL}/</loc></url>\n");
     for p in projects {
-        let slug = p.repo.strip_prefix("github.com/").unwrap_or(&p.repo);
         // `updated` is the latest release's date, so only the newest version can
         // honestly carry it as <lastmod>.
         let latest_mod = p
@@ -175,8 +174,8 @@ fn sitemap_xml(projects: &[GalleryProject]) -> String {
         for (i, v) in versions.iter().enumerate() {
             let lastmod = if i == 0 { latest_mod.as_str() } else { "" };
             urls.push_str(&format!(
-                "  <url><loc>{SITE_URL}/{slug}/{}/{v}/</loc>{lastmod}</url>\n",
-                p.project
+                "  <url><loc>{SITE_URL}/{}/{}/{v}/</loc>{lastmod}</url>\n",
+                p.repo, p.project
             ));
         }
     }
@@ -212,16 +211,18 @@ pub fn run(args: CrawlArgs) -> Result<()> {
         if entry.status == "yanked" || entry.status == "disputed" {
             continue;
         }
-        let Some((owner, repo)) = split_repo(&entry.repo) else {
+        let Some((host, segments)) = split_key(&entry.repo) else {
             continue;
         };
+        let path = segments.join("/");
         // Keep this repo's docs even if the clone below fails this run.
-        keep.insert(format!("{owner}/{repo}"));
+        keep.insert(entry.repo.clone());
 
         // Full clone so historical release revisions can be checked out.
         let work = std::env::temp_dir()
             .join("veryl-registry-crawl")
-            .join(format!("{owner}__{repo}"));
+            .join(host)
+            .join(segments.join("__"));
         let _ = fs::remove_dir_all(&work);
         if !clone(&entry.repo, &work) {
             eprintln!("clone failed: {}", entry.repo);
@@ -247,7 +248,13 @@ pub fn run(args: CrawlArgs) -> Result<()> {
                 .collect();
             let mut versions = Vec::new();
             for release in &releases {
-                let dest = doc_dest(&args.docs_out, owner, repo, &project.name, &release.version);
+                let dest = doc_dest(
+                    &args.docs_out,
+                    host,
+                    &segments,
+                    &project.name,
+                    &release.version,
+                );
                 // Skip only if built with the current chrome (and not forced);
                 // otherwise the template changed, so rebuild this version's pages.
                 if dest.exists() {
@@ -258,8 +265,9 @@ pub fn run(args: CrawlArgs) -> Result<()> {
                     let _ = fs::remove_dir_all(&dest);
                 }
                 let meta = DocMeta {
-                    owner,
-                    repo,
+                    repo: &entry.repo,
+                    host,
+                    path: &path,
                     project: &project.name,
                     version: &release.version,
                     description: project.description.as_deref(),
@@ -298,12 +306,18 @@ pub fn run(args: CrawlArgs) -> Result<()> {
                     categories: normalize_categories(&project.categories),
                     updated,
                 };
-                write_project_meta(&args.docs_out, owner, repo, &project.name, &project_meta);
+                write_project_meta(
+                    &args.docs_out,
+                    host,
+                    &segments,
+                    &project.name,
+                    &project_meta,
+                );
 
                 // Immutable pages fetch this at runtime, so they still list versions
                 // published after they were built.
                 sort_versions_desc(&mut versions);
-                write_versions_json(&args.docs_out, owner, repo, &project.name, &versions);
+                write_versions_json(&args.docs_out, host, &segments, &project.name, &versions);
             }
         }
 
@@ -341,14 +355,6 @@ fn load_entry(path: &Path) -> Option<Entry> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
-fn split_repo(repo: &str) -> Option<(&str, &str)> {
-    let rest = repo.strip_prefix("github.com/")?;
-    let (owner, name) = rest.split_once('/')?;
-    // `is_valid_segment` rejects empty, `.`/`..`, `/`, and out-of-charset names,
-    // so a hand-edited entry cannot smuggle path traversal into the docs tree.
-    (is_valid_segment(owner) && is_valid_segment(name)).then_some((owner, name))
-}
-
 fn clone(repo: &str, dir: &Path) -> bool {
     let mut cmd = Command::new("git");
     cmd.args(["clone", "--quiet", &format!("https://{repo}")])
@@ -383,14 +389,29 @@ fn discover_projects(root: &Path) -> Vec<Project> {
     out
 }
 
-fn doc_dest(docs_out: &Path, owner: &str, repo: &str, project: &str, version: &str) -> PathBuf {
-    docs_out.join(owner).join(repo).join(project).join(version)
+/// Docs land at `<docs_out>/<host>/<seg…>/<project>/<version>/`. Every segment
+/// was validated by `split_key`, so none can escape `docs_out`.
+fn doc_dest(
+    docs_out: &Path,
+    host: &str,
+    segments: &[&str],
+    project: &str,
+    version: &str,
+) -> PathBuf {
+    let mut dir = docs_out.join(host);
+    for seg in segments {
+        dir = dir.join(seg);
+    }
+    dir.join(project).join(version)
 }
 
 /// Identifies a documented version, for the injected doc toolbar and SEO head.
+/// `host`/`path` are `repo` split at the first `/` — kept apart because the toolbar
+/// picks an icon by host and shows the path as the slug.
 struct DocMeta<'a> {
-    owner: &'a str,
     repo: &'a str,
+    host: &'a str,
+    path: &'a str,
     project: &'a str,
     version: &'a str,
     description: Option<&'a str>,
@@ -448,6 +469,7 @@ const TOOLBAR_CSS: &str = "\
 .vlr-dot{width:9px;height:9px;border-radius:50%;background:#2baa59}\n\
 .vlr-pkg{color:#9aa3ad;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}\n\
 .vlr-pkg a{color:#9aa3ad}\n\
+.vlr-pkg svg{width:14px;height:14px;vertical-align:-2px;margin-right:.3rem}\n\
 .vlr-pkg b{color:#e6e8eb;font-weight:600}\n\
 .vlr-ver{color:#5fd28a;font-weight:600;background:#2f3237;border:1px solid #3a3d42;border-radius:4px;padding:2px 4px;font-family:inherit;font-size:13px;cursor:pointer}\n\
 .vlr-spacer{margin-left:auto}\n\
@@ -465,18 +487,36 @@ fn toolbar_html(meta: &DocMeta) -> String {
     format!(
         "<div class=\"vlr-bar\">\
          <a class=\"vlr-home\" href=\"/\"><span class=\"vlr-dot\"></span>Veryl registry</a>\
-         <span class=\"vlr-pkg\"><a href=\"https://github.com/{o}/{r}\">{o}/{r}</a> &middot; <b>{p}</b></span>\
-         <select class=\"vlr-ver\" aria-label=\"Version\" data-current=\"{v}\" data-base=\"/{o}/{r}/{p}/\"><option value=\"{v}\">v{v}</option></select>\
+         <span class=\"vlr-pkg\"><a href=\"https://{repo}\">{icon}{path}</a> &middot; <b>{p}</b></span>\
+         <select class=\"vlr-ver\" aria-label=\"Version\" data-current=\"{v}\" data-base=\"/{repo}/{p}/\"><option value=\"{v}\">v{v}</option></select>\
          <span class=\"vlr-spacer\"></span>\
-         <a class=\"vlr-ext\" href=\"https://github.com/{o}/{r}\">Source &#8599;</a>\
+         <a class=\"vlr-ext\" href=\"https://{repo}\">Source &#8599;</a>\
          {js}\
          </div>",
-        o = esc(meta.owner),
-        r = esc(meta.repo),
+        repo = esc(meta.repo),
+        icon = host_icon(meta.host),
+        path = esc(meta.path),
         p = esc(meta.project),
         v = esc(meta.version),
         js = VER_SWITCH_JS,
     )
+}
+
+// GitHub is the only host Veryl special-cases (the `github` dep shorthand), so it
+// alone gets a brand mark; every other host — GitLab included, since Veryl.toml
+// treats it as a plain `git` source — shows a neutral git glyph, sidestepping other
+// hosts' logo trademarks. Inline (no external requests), single-color via `currentColor`.
+const ICON_GITHUB: &str = "<svg viewBox=\"0 0 16 16\" width=\"16\" height=\"16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z\"/></svg>";
+const ICON_GIT: &str = "<svg viewBox=\"0 0 24 24\" width=\"16\" height=\"16\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"><circle cx=\"6\" cy=\"6\" r=\"2.4\"/><circle cx=\"6\" cy=\"18\" r=\"2.4\"/><circle cx=\"18\" cy=\"9\" r=\"2.4\"/><path d=\"M6 8.4v7.2M8.4 6H13a3 3 0 0 1 3 3\"/></svg>";
+
+/// GitHub's mark for github.com (the one host Veryl special-cases); a neutral git
+/// glyph for every other host.
+fn host_icon(host: &str) -> &'static str {
+    if host == "github.com" {
+        ICON_GITHUB
+    } else {
+        ICON_GIT
+    }
 }
 
 /// Appended to each doc page's `<title>` for clearer search results.
@@ -510,7 +550,7 @@ fn doc_head(meta: &DocMeta, page_url: &str) -> String {
         .map(str::to_string)
         .unwrap_or_else(|| format!("{} — Veryl HDL documentation", meta.project));
     let title = format!("{} {}{DOC_TITLE_SUFFIX}", meta.project, meta.version);
-    let repo_url = format!("https://github.com/{}/{}", meta.owner, meta.repo);
+    let repo_url = format!("https://{}", meta.repo);
     let jsonld = doc_jsonld(meta, &description, page_url, &repo_url);
     format!(
         "<style>\n{TOOLBAR_CSS}</style>\n{ANALYTICS}\
@@ -536,8 +576,8 @@ fn doc_head(meta: &DocMeta, page_url: &str) -> String {
 fn inject_toolbar(dest: &Path, meta: &DocMeta) {
     let bar = toolbar_html(meta);
     let base = format!(
-        "{SITE_URL}/{}/{}/{}/{}/",
-        meta.owner, meta.repo, meta.project, meta.version
+        "{SITE_URL}/{}/{}/{}/",
+        meta.repo, meta.project, meta.version
     );
     for entry in WalkDir::new(dest).into_iter().flatten() {
         if entry.path().extension().and_then(|e| e.to_str()) != Some("html") {
@@ -627,8 +667,9 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// change to the template — not the per-page data — moves the fingerprint).
 fn doc_chrome_fingerprint() -> String {
     let dummy = DocMeta {
-        owner: "o",
-        repo: "r",
+        repo: "h.example/o/r",
+        host: "h.example",
+        path: "o/r",
         project: "p",
         version: "0",
         description: None,
@@ -684,8 +725,23 @@ fn sanitize_authors(authors: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn write_project_meta(docs_out: &Path, owner: &str, repo: &str, project: &str, meta: &ProjectMeta) {
-    let dir = docs_out.join(owner).join(repo).join(project);
+/// Project dir `<docs_out>/<host>/<seg…>/<project>`; segments validated by `split_key`.
+fn project_dir(docs_out: &Path, host: &str, segments: &[&str], project: &str) -> PathBuf {
+    let mut dir = docs_out.join(host);
+    for seg in segments {
+        dir = dir.join(seg);
+    }
+    dir.join(project)
+}
+
+fn write_project_meta(
+    docs_out: &Path,
+    host: &str,
+    segments: &[&str],
+    project: &str,
+    meta: &ProjectMeta,
+) {
+    let dir = project_dir(docs_out, host, segments, project);
     let _ = fs::create_dir_all(&dir);
     if let Ok(json) = serde_json::to_string(meta) {
         let _ = fs::write(dir.join(META_FILE), json);
@@ -697,12 +753,12 @@ const VERSIONS_FILE: &str = "versions.json";
 /// The doc toolbar fetches this to populate its version dropdown.
 fn write_versions_json(
     docs_out: &Path,
-    owner: &str,
-    repo: &str,
+    host: &str,
+    segments: &[&str],
     project: &str,
     versions: &[String],
 ) {
-    let dir = docs_out.join(owner).join(repo).join(project);
+    let dir = project_dir(docs_out, host, segments, project);
     let _ = fs::create_dir_all(&dir);
     if let Ok(json) = serde_json::to_string(versions) {
         let _ = fs::write(dir.join(VERSIONS_FILE), json);
@@ -738,7 +794,7 @@ fn read_project_meta(project_dir: &Path) -> Option<ProjectMeta> {
 
 /// Immediate subdirectories of `dir`, ignoring files and dotdirs. Skipping
 /// dotdirs matters because `--docs-out` is a `gh-pages` checkout containing
-/// `.git`; owner/repo/project/version names never begin with a dot.
+/// `.git`; host/path/project/version names never begin with a dot.
 fn subdirs(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
@@ -758,57 +814,106 @@ fn dir_name(path: &Path) -> String {
 }
 
 /// Build the gallery from the persisted docs tree
-/// (`<docs_out>/<owner>/<repo>/<project>/<version>/`) rather than the live crawl,
+/// (`<docs_out>/<host>/<path>/<project>/<version>/`) rather than the live crawl,
 /// so a clone failure or GitHub outage never drops published docs from the listing.
+///
+/// A project dir is the parent of a `registry-meta.json`, so the repo path can be
+/// any depth (GitLab subgroups); the sidecar's `repo` field carries the full key.
 fn scan_docs(docs_out: &Path) -> Vec<GalleryProject> {
     let mut out = Vec::new();
-    for owner in subdirs(docs_out) {
-        for repo in subdirs(&owner) {
-            for project in subdirs(&repo) {
-                let versions: Vec<String> = subdirs(&project).iter().map(|p| dir_name(p)).collect();
-                if versions.is_empty() {
-                    continue;
-                }
-                let meta = read_project_meta(&project).unwrap_or_default();
-                let repo_full = if meta.repo.is_empty() {
-                    format!("github.com/{}/{}", dir_name(&owner), dir_name(&repo))
-                } else {
-                    meta.repo.clone()
-                };
-                out.push(GalleryProject {
-                    repo: repo_full,
-                    project: dir_name(&project),
-                    description: meta.description,
-                    license: meta.license,
-                    // Also on read: a sidecar a clone-failure crawl couldn't rewrite
-                    // must not leak emails.
-                    authors: sanitize_authors(&meta.authors),
-                    // Re-normalize on read: never show a slug outside the vocabulary.
-                    categories: normalize_categories(&meta.categories),
-                    updated: meta.updated,
-                    versions,
-                });
-            }
+    for entry in meta_files(docs_out) {
+        let Some(project) = entry.parent() else {
+            continue;
+        };
+        let versions: Vec<String> = subdirs(project).iter().map(|p| dir_name(p)).collect();
+        if versions.is_empty() {
+            continue;
         }
+        let meta = read_project_meta(project).unwrap_or_default();
+        if meta.repo.is_empty() {
+            continue;
+        }
+        out.push(GalleryProject {
+            repo: meta.repo,
+            project: dir_name(project),
+            description: meta.description,
+            license: meta.license,
+            // Also on read: a sidecar a clone-failure crawl couldn't rewrite
+            // must not leak emails.
+            authors: sanitize_authors(&meta.authors),
+            // Re-normalize on read: never show a slug outside the vocabulary.
+            categories: normalize_categories(&meta.categories),
+            updated: meta.updated,
+            versions,
+        });
     }
     out.sort_by(|a, b| a.repo.cmp(&b.repo).then_with(|| a.project.cmp(&b.project)));
     out
 }
 
-/// Delete docs for any `<owner>/<repo>` not in `keep` (yanked, disputed, or a
-/// deleted entry), then drop emptied owner directories.
+/// Every `registry-meta.json` in the docs tree, skipping dotdirs (the `gh-pages`
+/// checkout's `.git`). Each marks a `<project>` dir at the end of a repo path.
+fn meta_files(docs_out: &Path) -> Vec<PathBuf> {
+    WalkDir::new(docs_out)
+        .into_iter()
+        .filter_entry(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .flatten()
+        .filter(|e| e.file_name() == META_FILE)
+        .map(|e| e.path().to_path_buf())
+        .collect()
+}
+
+/// Remove a project's docs when its repo is no longer live, or when they sit at a
+/// stale on-disk location (a pre-migration layout) that no longer matches where the
+/// sidecar's key maps to — otherwise a relocated tree double-lists. An unreadable
+/// sidecar is left in place: a healthy crawl rewrites it, so a transient read miss
+/// must not drop a live repo's docs.
 fn reconcile_docs(docs_out: &Path, keep: &HashSet<String>) {
-    for owner_dir in subdirs(docs_out) {
-        let owner = dir_name(&owner_dir);
-        for repo_dir in subdirs(&owner_dir) {
-            let slug = format!("{owner}/{}", dir_name(&repo_dir));
-            if !keep.contains(&slug) {
-                let _ = fs::remove_dir_all(&repo_dir);
+    for meta_path in meta_files(docs_out) {
+        let Some(project) = meta_path.parent() else {
+            continue;
+        };
+        let Some(meta) = read_project_meta(project) else {
+            continue;
+        };
+        let stale = !keep.contains(&meta.repo);
+        let misplaced = match split_key(&meta.repo) {
+            Some((host, segments)) => {
+                project != project_dir(docs_out, host, &segments, &dir_name(project))
             }
+            None => true, // an unparseable key is not a canonical entry
+        };
+        if stale || misplaced {
+            let _ = fs::remove_dir_all(project);
         }
-        if subdirs(&owner_dir).is_empty() {
-            let _ = fs::remove_dir_all(&owner_dir);
+    }
+    prune_empty_dirs(docs_out);
+}
+
+/// Remove now-empty directories bottom-up (repo paths left behind by reconcile),
+/// never touching `docs_out` itself or dotdirs. `remove_dir` no-ops on non-empty.
+///
+/// `filter_entry` can't prune the `.git` subtree here: with `contents_first` a
+/// directory is yielded after its children, so `.git/objects` would be visited
+/// before `.git` is filtered. Instead every path component is checked for a
+/// leading dot.
+fn prune_empty_dirs(docs_out: &Path) {
+    for entry in WalkDir::new(docs_out)
+        .contents_first(true)
+        .into_iter()
+        .flatten()
+    {
+        if !entry.file_type().is_dir() || entry.path() == docs_out {
+            continue;
         }
+        let rel = entry.path().strip_prefix(docs_out).unwrap_or(entry.path());
+        if rel
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            continue;
+        }
+        let _ = fs::remove_dir(entry.path());
     }
 }
 
@@ -877,11 +982,16 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
                 p #noresult.hidden { "No matching packages." }
                 main {
                     @for (repo, projs) in &by_repo {
-                        @let slug = repo.strip_prefix("github.com/").unwrap_or(repo);
+                        @let (host, path) = repo.split_once('/').unwrap_or(("", repo));
                         section.repo {
-                            h2 { a href=(format!("https://{repo}")) { (slug) } }
+                            h2 {
+                                a.repo-link href=(format!("https://{repo}")) {
+                                    span.repo-host title=(host) { (PreEscaped(host_icon(host))) }
+                                    (path)
+                                }
+                            }
                             @for p in projs {
-                                (project_card(p, slug))
+                                (project_card(p))
                             }
                         }
                     }
@@ -903,7 +1013,6 @@ fn gallery_jsonld(projects: &[GalleryProject]) -> Markup {
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let slug = p.repo.strip_prefix("github.com/").unwrap_or(&p.repo);
             let mut versions = p.versions.clone();
             sort_versions_desc(&mut versions);
             let latest = versions.first().cloned().unwrap_or_default();
@@ -914,7 +1023,7 @@ fn gallery_jsonld(projects: &[GalleryProject]) -> Markup {
                     "@type": "SoftwareSourceCode",
                     "name": p.project,
                     "description": p.description.clone().unwrap_or_default(),
-                    "url": format!("{SITE_URL}/{slug}/{}/{latest}/", p.project),
+                    "url": format!("{SITE_URL}/{}/{}/{latest}/", p.repo, p.project),
                     "codeRepository": format!("https://{}", p.repo),
                     "programmingLanguage": "Veryl",
                 }
@@ -936,10 +1045,11 @@ fn gallery_jsonld(projects: &[GalleryProject]) -> Markup {
 }
 
 /// One gallery card for a documented project.
-fn project_card(p: &GalleryProject, slug: &str) -> Markup {
+fn project_card(p: &GalleryProject) -> Markup {
     let mut versions = p.versions.clone();
     sort_versions_desc(&mut versions);
     let latest = versions.first().cloned().unwrap_or_default();
+    let (host, path) = p.repo.split_once('/').unwrap_or(("", p.repo.as_str()));
 
     let cat_search = p
         .categories
@@ -950,7 +1060,7 @@ fn project_card(p: &GalleryProject, slug: &str) -> Markup {
     let haystack = format!(
         "{} {} {} {} {} {}",
         p.project,
-        slug,
+        p.repo,
         p.description.as_deref().unwrap_or(""),
         p.license.as_deref().unwrap_or(""),
         p.authors.join(" "),
@@ -969,13 +1079,20 @@ fn project_card(p: &GalleryProject, slug: &str) -> Markup {
         meta_parts.push(p.authors.join(", "));
     }
 
-    // Copy-pasteable `[dependencies]` entry (key = project name; the resolver
-    // finds the project by name inside the repo).
-    let dep = format!(
-        "{} = {{ github = \"{slug}\", version = \"{latest}\" }}",
-        p.project
-    );
-    let href = format!("{slug}/{}/{latest}/", p.project);
+    // The dep key is the project name (the resolver finds it by name in the repo).
+    // Veryl's `github` shorthand for github.com, else a full `git` URL.
+    let dep = if host == "github.com" {
+        format!(
+            "{} = {{ github = \"{path}\", version = \"{latest}\" }}",
+            p.project
+        )
+    } else {
+        format!(
+            "{} = {{ git = \"https://{}\", version = \"{latest}\" }}",
+            p.project, p.repo
+        )
+    };
+    let href = format!("{}/{}/{latest}/", p.repo, p.project);
 
     html! {
         div.pkg data-search=(haystack) data-cats=(p.categories.join(" ")) {
@@ -1020,20 +1137,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn splits_repo() {
-        assert_eq!(split_repo("github.com/alice/fifo"), Some(("alice", "fifo")));
-        assert_eq!(split_repo("gitlab.com/alice/fifo"), None);
-        assert_eq!(split_repo("github.com/alice"), None);
-    }
-
-    #[test]
-    fn split_repo_rejects_traversal() {
-        assert_eq!(split_repo("github.com/../etc"), None);
-        assert_eq!(split_repo("github.com/a/.."), None);
-        assert_eq!(split_repo("github.com/a/b/c"), None);
-    }
-
-    #[test]
     fn discover_skips_unsafe_project_name() {
         let root = std::env::temp_dir().join("veryl-reg-discover-unsafe");
         let _ = fs::remove_dir_all(&root);
@@ -1059,8 +1162,14 @@ mod tests {
 
     #[test]
     fn doc_dest_layout() {
-        let p = doc_dest(Path::new("/out"), "alice", "fifo", "fifo", "1.2.0");
-        assert!(p.ends_with("alice/fifo/fifo/1.2.0"));
+        let p = doc_dest(
+            Path::new("/out"),
+            "github.com",
+            &["alice", "fifo"],
+            "fifo",
+            "1.2.0",
+        );
+        assert!(p.ends_with("github.com/alice/fifo/fifo/1.2.0"));
     }
 
     #[test]
@@ -1084,12 +1193,15 @@ mod tests {
         }];
         let html = gallery_html(&g);
         assert!(html.contains("https://github.com/alice/fifo"));
-        // the card links to the latest version's docs and shows it as the badge
-        assert!(html.contains("alice/fifo/fifo/1.2.0/"));
+        // the section header shows the host icon and the path (host stripped)
+        assert!(html.contains("class=\"repo-host\""));
+        assert!(html.contains(">alice/fifo<"));
+        // the card links to the latest version's docs (host-qualified) + badge
+        assert!(html.contains("github.com/alice/fifo/fifo/1.2.0/"));
         assert!(html.contains("v1.2.0"));
         // per-version chips were removed (switching moved to the doc toolbar), so
         // older versions are not linked from the card
-        assert!(!html.contains("alice/fifo/fifo/1.0.0/"));
+        assert!(!html.contains("github.com/alice/fifo/fifo/1.0.0/"));
         // category chip is a clickable button carrying its slug, and searchable
         assert!(html.contains("class=\"cat\" data-cat=\"memory\">Memory<"));
         assert!(html.contains("data-search=") && html.to_lowercase().contains("memory"));
@@ -1101,6 +1213,38 @@ mod tests {
         // copy-pasteable dependency snippet (github shorthand + latest version)
         assert!(html.contains("class=\"pkg-dep\""));
         assert!(html.contains("github = &quot;alice/fifo&quot;, version = &quot;1.2.0&quot;"));
+    }
+
+    #[test]
+    fn gallery_renders_non_github_host() {
+        let g = vec![GalleryProject {
+            repo: "gitlab.com/acme/group/fifo".into(),
+            project: "fifo".into(),
+            description: None,
+            license: None,
+            authors: vec![],
+            categories: vec![],
+            updated: None,
+            versions: vec!["1.2.0".into()],
+        }];
+        let html = gallery_html(&g);
+        // host-qualified docs URL preserves the full subgroup path
+        assert!(html.contains("gitlab.com/acme/group/fifo/fifo/1.2.0/"));
+        // section header strips the host, keeps the full path
+        assert!(html.contains(">acme/group/fifo<"));
+        // non-github hosts use the full `git` URL, not the `github` shorthand
+        assert!(html.contains(
+            "git = &quot;https://gitlab.com/acme/group/fifo&quot;, version = &quot;1.2.0&quot;"
+        ));
+        assert!(!html.contains("github ="));
+    }
+
+    #[test]
+    fn host_icon_brands_only_github() {
+        assert_eq!(host_icon("github.com"), ICON_GITHUB);
+        // every other host — gitlab.com included — uses the neutral git glyph
+        assert_eq!(host_icon("gitlab.com"), ICON_GIT);
+        assert_eq!(host_icon("git.example.com"), ICON_GIT);
     }
 
     #[test]
@@ -1155,7 +1299,7 @@ mod tests {
         assert!(html.contains("application/ld+json"));
         assert!(html.contains("\"@type\":\"SoftwareSourceCode\""));
         assert!(html.contains("\"codeRepository\":\"https://github.com/alice/fifo\""));
-        assert!(html.contains("registry.veryl-lang.org/alice/fifo/fifo/1.2.0/"));
+        assert!(html.contains("registry.veryl-lang.org/github.com/alice/fifo/fifo/1.2.0/"));
     }
 
     #[test]
@@ -1174,11 +1318,11 @@ mod tests {
         assert!(sm.contains("<loc>https://registry.veryl-lang.org/</loc>"));
         // lastmod only on the latest version (1.2.0); older 1.0.0 carries none
         assert!(sm.contains(
-            "<loc>https://registry.veryl-lang.org/alice/fifo/fifo/1.2.0/</loc><lastmod>2026-07-15</lastmod></url>"
+            "<loc>https://registry.veryl-lang.org/github.com/alice/fifo/fifo/1.2.0/</loc><lastmod>2026-07-15</lastmod></url>"
         ));
-        assert!(
-            sm.contains("<loc>https://registry.veryl-lang.org/alice/fifo/fifo/1.0.0/</loc></url>")
-        );
+        assert!(sm.contains(
+            "<loc>https://registry.veryl-lang.org/github.com/alice/fifo/fifo/1.0.0/</loc></url>"
+        ));
 
         assert!(robots_txt().contains("Sitemap: https://registry.veryl-lang.org/sitemap.xml"));
     }
@@ -1186,13 +1330,14 @@ mod tests {
     #[test]
     fn doc_head_has_seo() {
         let meta = DocMeta {
-            owner: "alice",
-            repo: "fifo",
+            repo: "github.com/alice/fifo",
+            host: "github.com",
+            path: "alice/fifo",
             project: "fifo",
             version: "1.2.0",
             description: Some("A FIFO core"),
         };
-        let url = "https://registry.veryl-lang.org/alice/fifo/fifo/1.2.0/";
+        let url = "https://registry.veryl-lang.org/github.com/alice/fifo/fifo/1.2.0/";
         let head = doc_head(&meta, url);
         assert!(head.contains("<meta name=\"description\" content=\"A FIFO core\">"));
         assert!(head.contains(&format!("<link rel=\"canonical\" href=\"{url}\">")));
@@ -1222,8 +1367,9 @@ mod tests {
         )
         .unwrap();
         let meta = DocMeta {
-            owner: "alice",
-            repo: "fifo",
+            repo: "github.com/alice/fifo",
+            host: "github.com",
+            path: "alice/fifo",
             project: "fifo",
             version: "1.2.0",
             description: Some("A FIFO"),
@@ -1236,7 +1382,7 @@ mod tests {
         assert!(out.contains("<link rel=\"icon\" type=\"image/png\" href=\"/favicon.png\">"));
         assert!(out.contains("<title>fifo · Veryl registry</title>"));
         assert!(out.contains(
-            "rel=\"canonical\" href=\"https://registry.veryl-lang.org/alice/fifo/fifo/1.2.0/\""
+            "rel=\"canonical\" href=\"https://registry.veryl-lang.org/github.com/alice/fifo/fifo/1.2.0/\""
         ));
         assert!(out.contains("class=\"vlr-bar\"")); // toolbar still injected
         let _ = fs::remove_dir_all(&dir);
@@ -1245,8 +1391,9 @@ mod tests {
     #[test]
     fn toolbar_inserts_after_body_and_links_out() {
         let meta = DocMeta {
-            owner: "alice",
-            repo: "fifo",
+            repo: "github.com/alice/fifo",
+            host: "github.com",
+            path: "alice/fifo",
             project: "fifo",
             version: "1.2.0",
             description: None,
@@ -1254,6 +1401,7 @@ mod tests {
         let bar = toolbar_html(&meta);
         assert!(bar.contains("href=\"/\"")); // home = gallery root (absolute)
         assert!(bar.contains("https://github.com/alice/fifo"));
+        assert!(bar.contains(ICON_GITHUB)); // host mark next to the path
         assert!(bar.contains("v1.2.0"));
 
         let out = insert_after_body_open("<html><head></head><body>\n<p>x</p></body>", &bar);
@@ -1272,13 +1420,17 @@ mod tests {
     fn scans_docs_tree_and_survives_stray_files() {
         let root = std::env::temp_dir().join("veryl-reg-scan-test");
         let _ = fs::remove_dir_all(&root);
-        let proj = root.join("alice").join("fifo").join("fifo");
+        let proj = root
+            .join("github.com")
+            .join("alice")
+            .join("fifo")
+            .join("fifo");
         fs::create_dir_all(proj.join("1.0.0")).unwrap();
         fs::create_dir_all(proj.join("1.2.0")).unwrap();
         write_project_meta(
             &root,
-            "alice",
-            "fifo",
+            "github.com",
+            &["alice", "fifo"],
             "fifo",
             &ProjectMeta {
                 repo: "github.com/alice/fifo".into(),
@@ -1289,9 +1441,9 @@ mod tests {
                 updated: Some("2026-05-01".into()),
             },
         );
-        // a stray root file (the gallery index) must be ignored, not treated as an owner
+        // a stray root file (the gallery index) must be ignored, not treated as a project
         fs::write(root.join("index.html"), "x").unwrap();
-        // a `.git` dir (docs_out is a gh-pages checkout) must not become an owner
+        // a `.git` dir (docs_out is a gh-pages checkout) must not be scanned
         fs::create_dir_all(root.join(".git").join("objects")).unwrap();
 
         let g = scan_docs(&root);
@@ -1311,7 +1463,7 @@ mod tests {
         assert!(html.contains("An async FIFO"));
         assert!(html.contains("MIT OR Apache-2.0"));
         assert!(html.contains("updated 2026-05-01"));
-        assert!(html.contains("alice/fifo/fifo/1.2.0/"));
+        assert!(html.contains("github.com/alice/fifo/fifo/1.2.0/"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1320,19 +1472,110 @@ mod tests {
     fn reconcile_removes_docs_absent_from_keep() {
         let root = std::env::temp_dir().join("veryl-reg-reconcile-test");
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("alice").join("keep").join("keep").join("1.0.0")).unwrap();
-        fs::create_dir_all(root.join("bob").join("gone").join("gone").join("1.0.0")).unwrap();
+        // Two projects; reconcile keys each off its sidecar's full `<host>/<path>`.
+        let keep_dir = root
+            .join("github.com")
+            .join("alice")
+            .join("keep")
+            .join("keep");
+        fs::create_dir_all(keep_dir.join("1.0.0")).unwrap();
+        fs::write(keep_dir.join("1.0.0").join("index.html"), "x").unwrap();
+        write_project_meta(
+            &root,
+            "github.com",
+            &["alice", "keep"],
+            "keep",
+            &ProjectMeta {
+                repo: "github.com/alice/keep".into(),
+                ..Default::default()
+            },
+        );
+        let gone_dir = root
+            .join("gitlab.com")
+            .join("bob")
+            .join("gone")
+            .join("gone");
+        fs::create_dir_all(gone_dir.join("1.0.0")).unwrap();
+        write_project_meta(
+            &root,
+            "gitlab.com",
+            &["bob", "gone"],
+            "gone",
+            &ProjectMeta {
+                repo: "gitlab.com/bob/gone".into(),
+                ..Default::default()
+            },
+        );
         fs::create_dir_all(root.join(".git").join("objects")).unwrap(); // must be left alone
 
         let mut keep = HashSet::new();
-        keep.insert("alice/keep".to_string());
+        keep.insert("github.com/alice/keep".to_string());
         reconcile_docs(&root, &keep);
 
-        assert!(root.join("alice").join("keep").exists()); // kept
-        assert!(!root.join("bob").join("gone").exists()); // removed (yanked/deleted)
-        assert!(!root.join("bob").exists()); // emptied owner dir dropped
+        assert!(root.join("github.com").join("alice").join("keep").exists()); // kept
+        assert!(!gone_dir.exists()); // removed (yanked/deleted)
+        assert!(!root.join("gitlab.com").exists()); // emptied host path pruned
         assert!(root.join(".git").join("objects").exists()); // .git never touched
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_removes_stale_layout_of_live_repo() {
+        let root = std::env::temp_dir().join("veryl-reg-reconcile-migrate");
+        let _ = fs::remove_dir_all(&root);
+        // Pre-migration layout `<owner>/<repo>/<project>/` whose sidecar maps to
+        // `<host>/<owner>/<repo>`: even though the repo is live, this stale copy
+        // must go so it can't double-list next to the canonical location.
+        let stale = root.join("veryl-lang").join("vip").join("vip");
+        fs::create_dir_all(stale.join("0.1.0")).unwrap();
+        fs::write(stale.join("0.1.0").join("index.html"), "x").unwrap();
+        let meta = ProjectMeta {
+            repo: "github.com/veryl-lang/vip".into(),
+            ..Default::default()
+        };
+        fs::write(stale.join(META_FILE), serde_json::to_string(&meta).unwrap()).unwrap();
+        // The canonical new-layout copy of the same live repo.
+        let canonical = root
+            .join("github.com")
+            .join("veryl-lang")
+            .join("vip")
+            .join("vip");
+        fs::create_dir_all(canonical.join("0.1.0")).unwrap();
+        fs::write(canonical.join("0.1.0").join("index.html"), "x").unwrap();
+        write_project_meta(&root, "github.com", &["veryl-lang", "vip"], "vip", &meta);
+
+        let mut keep = HashSet::new();
+        keep.insert("github.com/veryl-lang/vip".to_string());
+        reconcile_docs(&root, &keep);
+
+        assert!(!root.join("veryl-lang").exists()); // stale layout removed + pruned
+        assert!(canonical.exists()); // canonical layout kept
+        // and the gallery lists the project exactly once (no duplicate card)
+        assert_eq!(scan_docs(&root).len(), 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_keeps_docs_with_unreadable_sidecar() {
+        let root = std::env::temp_dir().join("veryl-reg-reconcile-corrupt");
+        let _ = fs::remove_dir_all(&root);
+        // A live repo whose sidecar is corrupt this run (e.g. a partial write):
+        // it can't be identified, so a transient miss must not delete its docs.
+        let proj = root
+            .join("github.com")
+            .join("alice")
+            .join("fifo")
+            .join("fifo");
+        fs::create_dir_all(proj.join("1.0.0")).unwrap();
+        fs::write(proj.join(META_FILE), "not json").unwrap();
+
+        let mut keep = HashSet::new();
+        keep.insert("github.com/alice/fifo".to_string());
+        reconcile_docs(&root, &keep);
+
+        assert!(proj.exists()); // unreadable sidecar left in place
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1370,8 +1613,9 @@ mod tests {
     #[test]
     fn toolbar_has_runtime_version_dropdown() {
         let meta = DocMeta {
-            owner: "a",
-            repo: "b",
+            repo: "github.com/a/b",
+            host: "github.com",
+            path: "a/b",
             project: "p",
             version: "1.2.0",
             description: None,
@@ -1379,7 +1623,7 @@ mod tests {
         let bar = toolbar_html(&meta);
         assert!(bar.contains("<select class=\"vlr-ver\""));
         assert!(bar.contains("data-current=\"1.2.0\"")); // current version marked
-        assert!(bar.contains("data-base=\"/a/b/p/\"")); // absolute base for paths
+        assert!(bar.contains("data-base=\"/github.com/a/b/p/\"")); // absolute base for paths
         assert!(bar.contains("versions.json")); // dropdown populated at runtime
         assert!(bar.contains(">v1.2.0<")); // initial option works without JS
     }
