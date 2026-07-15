@@ -104,8 +104,7 @@ struct ProjectMeta {
 
 const META_FILE: &str = "registry-meta.json";
 
-/// Controlled category vocabulary: `(slug, display)`. Only these are surfaced;
-/// anything else in `Veryl.toml` `[project].categories` is dropped.
+/// The controlled category vocabulary; anything outside it is dropped.
 const CATEGORIES: &[(&str, &str)] = &[
     ("processor", "Processor"),
     ("peripheral", "Peripheral"),
@@ -120,8 +119,7 @@ const CATEGORIES: &[(&str, &str)] = &[
     ("tooling", "Tooling"),
 ];
 
-/// Keep only recognized slugs (lowercased, de-duplicated) in canonical order, so
-/// every card lists its categories consistently.
+/// Recognized slugs only, in canonical order so cards list them consistently.
 fn normalize_categories(raw: &[String]) -> Vec<String> {
     let wanted: HashSet<String> = raw.iter().map(|c| c.trim().to_lowercase()).collect();
     CATEGORIES
@@ -621,7 +619,8 @@ fn scan_docs(docs_out: &Path) -> Vec<GalleryProject> {
                     // Also on read: a sidecar a clone-failure crawl couldn't rewrite
                     // must not leak emails.
                     authors: sanitize_authors(&meta.authors),
-                    categories: meta.categories,
+                    // Re-normalize on read: never show a slug outside the vocabulary.
+                    categories: normalize_categories(&meta.categories),
                     updated: meta.updated,
                     versions,
                 });
@@ -684,7 +683,12 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 .pkg-dep .copy{flex:0 0 auto;font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:5px;padding:.1rem .55rem;cursor:pointer}\n\
 .pkg-dep .copy:hover{border-color:var(--brand);color:var(--brand)}\n\
 .cats{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.55rem}\n\
-.cat{font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.12rem .55rem}\n\
+.cat{font:inherit;font-size:.72rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.12rem .55rem;cursor:pointer}\n\
+.cat:hover{border-color:var(--brand);color:var(--brand)}\n\
+.catbar{display:flex;flex-wrap:wrap;gap:.4rem;margin:.2rem 0 1rem}\n\
+.catf{font:inherit;font-size:.78rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.2rem .7rem;cursor:pointer}\n\
+.catf:hover{border-color:var(--brand);color:var(--brand)}\n\
+.catf.active{background:var(--brand);border-color:var(--brand);color:#fff}\n\
 .hidden{display:none}\n";
 
 // Client-side package search: no backend, filters the rendered list in place.
@@ -693,13 +697,20 @@ const q=document.getElementById('q');\n\
 const pkgs=[...document.querySelectorAll('.pkg')];\n\
 const repos=[...document.querySelectorAll('.repo')];\n\
 const noresult=document.getElementById('noresult');\n\
+let cat='';\n\
 function filter(){\n\
   const t=q.value.trim().toLowerCase();let any=false;\n\
-  for(const p of pkgs){const show=!t||p.dataset.search.includes(t);p.classList.toggle('hidden',!show);if(show)any=true;}\n\
+  for(const p of pkgs){\n\
+    const okText=!t||p.dataset.search.includes(t);\n\
+    const okCat=!cat||(' '+p.dataset.cats+' ').includes(' '+cat+' ');\n\
+    const show=okText&&okCat;p.classList.toggle('hidden',!show);if(show)any=true;\n\
+  }\n\
   for(const r of repos){r.classList.toggle('hidden',!r.querySelector('.pkg:not(.hidden)'));}\n\
-  if(noresult)noresult.classList.toggle('hidden',any||!t);\n\
+  if(noresult)noresult.classList.toggle('hidden',any||(!t&&!cat));\n\
 }\n\
+function selectCat(c){cat=c;document.querySelectorAll('.catf').forEach(function(x){x.classList.toggle('active',x.dataset.cat===c);});filter();}\n\
 q.addEventListener('input',filter);\n\
+document.querySelectorAll('.catf,.cat').forEach(function(b){b.addEventListener('click',function(){selectCat(b.dataset.cat);});});\n\
 document.querySelectorAll('.copy').forEach(function(b){b.addEventListener('click',function(){navigator.clipboard.writeText(b.previousElementSibling.textContent).then(function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy';},1200);});});});\n";
 
 fn gallery_html(projects: &[GalleryProject]) -> String {
@@ -707,6 +718,16 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
     for p in projects {
         by_repo.entry(p.repo.as_str()).or_default().push(p);
     }
+
+    // Facets, only for categories present in the gallery.
+    let present: Vec<&(&str, &str)> = CATEGORIES
+        .iter()
+        .filter(|(slug, _)| {
+            projects
+                .iter()
+                .any(|p| p.categories.iter().any(|c| c == slug))
+        })
+        .collect();
 
     let mut body = String::new();
     for (repo, projs) in &by_repo {
@@ -720,7 +741,6 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
             let mut versions = p.versions.clone();
             sort_versions_desc(&mut versions);
             let latest = versions.first().cloned().unwrap_or_default();
-            // Searchable text (name + repo + description + license + authors).
             let cat_search = p
                 .categories
                 .iter()
@@ -738,8 +758,9 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
             )
             .to_lowercase();
             body.push_str(&format!(
-                "<div class=\"pkg\" data-search=\"{}\">\n",
-                esc(&haystack)
+                "<div class=\"pkg\" data-search=\"{}\" data-cats=\"{}\">\n",
+                esc(&haystack),
+                esc(&p.categories.join(" "))
             ));
             body.push_str(&format!(
                 "<div class=\"pkg-head\"><a class=\"pkg-name\" href=\"{s}/{p}/{l}/\">{p}</a><span class=\"pkg-latest\">v{l}</span></div>\n",
@@ -781,7 +802,8 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
                 body.push_str("<div class=\"cats\">\n");
                 for c in &p.categories {
                     body.push_str(&format!(
-                        "<span class=\"cat\">{}</span>\n",
+                        "<button class=\"cat\" data-cat=\"{}\">{}</button>\n",
+                        esc(c),
                         esc(category_display(c))
                     ));
                 }
@@ -813,6 +835,19 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
     html.push_str(
         "<input id=\"q\" type=\"search\" placeholder=\"Search packages…\" autocomplete=\"off\">\n",
     );
+    if !present.is_empty() {
+        html.push_str(
+            "<div class=\"catbar\"><button class=\"catf active\" data-cat=\"\">All</button>\n",
+        );
+        for (slug, disp) in &present {
+            html.push_str(&format!(
+                "<button class=\"catf\" data-cat=\"{}\">{}</button>\n",
+                esc(slug),
+                esc(disp)
+            ));
+        }
+        html.push_str("</div>\n");
+    }
     html.push_str("<p id=\"noresult\" class=\"hidden\">No matching packages.</p>\n");
     html.push_str("<main>\n");
     html.push_str(&body);
@@ -908,9 +943,12 @@ mod tests {
         // per-version chips were removed (switching moved to the doc toolbar), so
         // older versions are not linked from the card
         assert!(!html.contains("alice/fifo/fifo/1.0.0/"));
-        // category chip (display name) rendered and searchable
-        assert!(html.contains("class=\"cat\">Memory<"));
+        // category chip is a clickable button carrying its slug, and searchable
+        assert!(html.contains("class=\"cat\" data-cat=\"memory\">Memory<"));
         assert!(html.contains("data-search=") && html.to_lowercase().contains("memory"));
+        // filter facet for the present category + card carries its slugs
+        assert!(html.contains("class=\"catf\" data-cat=\"memory\">Memory<"));
+        assert!(html.contains("data-cats=\"memory\""));
         // copy-pasteable dependency snippet (github shorthand + latest version)
         assert!(html.contains("class=\"pkg-dep\""));
         assert!(html.contains("github = &quot;alice/fifo&quot;, version = &quot;1.2.0&quot;"));
