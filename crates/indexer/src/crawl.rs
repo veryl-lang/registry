@@ -703,6 +703,8 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 .catf{font:inherit;font-size:.78rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.2rem .7rem;cursor:pointer}\n\
 .catf:hover{border-color:var(--brand);color:var(--brand)}\n\
 .catf.active{background:var(--brand);border-color:var(--brand);color:#fff}\n\
+.catf:disabled{opacity:.4;cursor:default}\n\
+.catf:disabled:hover{border-color:var(--border);color:var(--muted)}\n\
 .hidden{display:none}\n";
 
 // Client-side package search: no backend, filters the rendered list in place.
@@ -733,14 +735,11 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
         by_repo.entry(p.repo.as_str()).or_default().push(p);
     }
 
-    // Facets, only for categories present in the gallery.
-    let present: Vec<&(&str, &str)> = CATEGORIES
+    // Slugs that at least one project uses; the facet bar shows the whole
+    // vocabulary but only these are interactive filters.
+    let in_use: HashSet<&str> = projects
         .iter()
-        .filter(|(slug, _)| {
-            projects
-                .iter()
-                .any(|p| p.categories.iter().any(|c| c == slug))
-        })
+        .flat_map(|p| p.categories.iter().map(String::as_str))
         .collect();
 
     let mut body = String::new();
@@ -849,19 +848,21 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
     html.push_str(
         "<input id=\"q\" type=\"search\" placeholder=\"Search packages…\" autocomplete=\"off\">\n",
     );
-    if !present.is_empty() {
-        html.push_str(
-            "<div class=\"catbar\"><button class=\"catf active\" data-cat=\"\">All</button>\n",
-        );
-        for (slug, disp) in &present {
-            html.push_str(&format!(
-                "<button class=\"catf\" data-cat=\"{}\">{}</button>\n",
-                esc(slug),
-                esc(disp)
-            ));
-        }
-        html.push_str("</div>\n");
+    html.push_str(
+        "<div class=\"catbar\"><button class=\"catf active\" data-cat=\"\">All</button>\n",
+    );
+    for &(slug, disp) in CATEGORIES {
+        // Categories no project uses yet are shown as the vocabulary but are not
+        // interactive filters (they would only ever match nothing).
+        let disabled = if in_use.contains(slug) { "" } else { " disabled" };
+        html.push_str(&format!(
+            "<button class=\"catf\" data-cat=\"{}\"{}>{}</button>\n",
+            esc(slug),
+            disabled,
+            esc(disp)
+        ));
     }
+    html.push_str("</div>\n");
     html.push_str("<p id=\"noresult\" class=\"hidden\">No matching packages.</p>\n");
     html.push_str("<main>\n");
     html.push_str(&body);
@@ -963,6 +964,8 @@ mod tests {
         // filter facet for the present category + card carries its slugs
         assert!(html.contains("class=\"catf\" data-cat=\"memory\">Memory<"));
         assert!(html.contains("data-cats=\"memory\""));
+        // the whole vocabulary is shown; unused categories are disabled, not hidden
+        assert!(html.contains("data-cat=\"processor\" disabled>Processor<"));
         // copy-pasteable dependency snippet (github shorthand + latest version)
         assert!(html.contains("class=\"pkg-dep\""));
         assert!(html.contains("github = &quot;alice/fifo&quot;, version = &quot;1.2.0&quot;"));
