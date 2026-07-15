@@ -37,6 +37,8 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 .catf{font:inherit;font-size:.78rem;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:999px;padding:.2rem .7rem;cursor:pointer}
 .catf:hover{border-color:var(--brand);color:var(--brand)}
 .catf.active{background:var(--brand);border-color:var(--brand);color:#fff}
+.catf:disabled{opacity:.4;cursor:default}
+.catf:disabled:hover{border-color:var(--border);color:var(--muted)}
 .hidden{display:none}
 </style>
 <script async src="https://www.googletagmanager.com/gtag/js?id=G-NXW2P6CCF3"></script>
@@ -46,7 +48,17 @@ input#q:focus{outline:2px solid var(--brand);outline-offset:1px;border-color:var
 <header class="hero"><h1><span class="dot"></span>Veryl registry</h1><p class="tagline">Published Veryl projects and their generated documentation.</p></header>
 <input id="q" type="search" placeholder="Search packages…" autocomplete="off">
 <div class="catbar"><button class="catf active" data-cat="">All</button>
+<button class="catf" data-cat="processor" disabled>Processor</button>
+<button class="catf" data-cat="peripheral" disabled>Peripheral</button>
+<button class="catf" data-cat="interconnect" disabled>Interconnect / Bus</button>
+<button class="catf" data-cat="interface" disabled>Interface / Connectivity</button>
+<button class="catf" data-cat="memory" disabled>Memory</button>
+<button class="catf" data-cat="arithmetic" disabled>Arithmetic / Math</button>
+<button class="catf" data-cat="crypto" disabled>Crypto / Security</button>
 <button class="catf" data-cat="verification">Verification</button>
+<button class="catf" data-cat="system" disabled>System / Reference Design</button>
+<button class="catf" data-cat="utility" disabled>Utility</button>
+<button class="catf" data-cat="tooling" disabled>Tooling</button>
 </div>
 <p id="noresult" class="hidden">No matching packages.</p>
 <main>
