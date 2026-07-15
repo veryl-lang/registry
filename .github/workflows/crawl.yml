@@ -44,29 +44,15 @@ jobs:
           path: site
         continue-on-error: true # first run: branch may not exist yet
 
-      # Rust for the indexer, and to build veryl from master (below).
+      # Rust for the indexer.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # vip and other projects using not-yet-released features (e.g. `[[components]]`)
-      # need a compiler ahead of the latest release, so build veryl from master rather
-      # than setup-veryl (which installs releases). Cache the binary keyed on veryl's
-      # master SHA: rebuild only when master moves, reuse otherwise. Revert to
-      # veryl-lang/setup-veryl@v1 once a release covers the features these repos use.
-      - name: Resolve veryl master revision
-        id: veryl
-        run: echo "sha=$(git ls-remote https://github.com/veryl-lang/veryl.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-      - name: Cache veryl binary
-        id: veryl-cache
-        uses: actions/cache@v4
+      # vip (and others) use features ahead of the latest release (`[[components]]`,
+      # `[project] categories`), so install the nightly toolchain rather than a release.
+      - uses: veryl-lang/setup-veryl@v1
         with:
-          path: ~/.local/veryl/bin/veryl
-          key: veryl-master-${{ steps.veryl.outputs.sha }}
-      - name: Build veryl from master
-        if: steps.veryl-cache.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/veryl-lang/veryl.git --rev ${{ steps.veryl.outputs.sha }} --profile release-verylup --locked --root ~/.local/veryl veryl
-      - name: Add veryl to PATH
-        run: echo "$HOME/.local/veryl/bin" >> "$GITHUB_PATH"
+          version: nightly
 
       - name: Crawl and build docs
         run: |
