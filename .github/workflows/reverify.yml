@@ -1,0 +1,141 @@
+name: reverify
+
+# `veryl publish` records the release locally, so the submission that follows it
+# usually arrives before the push: `dispatch.yml` leaves that PR open, and nothing
+# else re-checks it. This re-clones each pending submission and merges the ones
+# that now carry a release.
+#
+# A `pending` entry sits either in an open `submit/*` PR (normal) or in the index,
+# if a maintainer merged one by hand — a job each. They run in sequence: a PR
+# branch carries the whole index, so both could promote the same entry and the
+# second merge would conflict.
+#
+# An hour before the crawl, so a promotion is documented the same night.
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # daily 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # start the crawl (see the promote step)
+
+concurrency:
+  group: reverify
+  cancel-in-progress: false
+
+jobs:
+  submissions:
+    runs-on: ubuntu-latest
+    steps:
+      # Keeps credentials (this job pushes to PR branches); full fetch so the loop
+      # can check out each submission branch.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the indexer
+        run: cargo build -p registry-indexer --release
+
+      - name: Promote and merge verifiable submissions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # This merges without review and anyone can open a PR, so take only
+          # branches in this repository — creating one needs write access.
+          gh pr list --state open --limit 100 --json number,headRefName,headRepositoryOwner \
+            --jq '.[]
+                  | select(.headRefName | startswith("submit/"))
+                  | select(.headRepositoryOwner.login == env.OWNER)
+                  | "\(.number) \(.headRefName)"' \
+            > submissions.txt
+          merged=0
+
+          while read -r number branch; do
+            [ -n "$number" ] || continue
+            git checkout --quiet -B "$branch" "origin/$branch" || {
+              echo "PR #$number ($branch): branch gone, skipping"
+              continue
+            }
+            # Same guard, second half: a branch touching anything but entry files
+            # is a hand-edit, not something to merge blind.
+            if git diff --name-only "origin/master...HEAD" | grep -qvE '^registry/.+\.json$'; then
+              echo "PR #$number ($branch): changes more than registry entries, skipping"
+              continue
+            fi
+            ./target/release/registry-indexer reverify
+            if git diff --quiet; then
+              echo "PR #$number ($branch): still unverifiable"
+              continue
+            fi
+            # The branch carries the whole index, so an unrelated stale entry may be
+            # promoted alongside; the message names whichever comes first.
+            file=$(git diff --name-only | head -1)
+            slug=${file#registry/}
+            slug=${slug%.json}
+            git commit --quiet -am "Promote $slug to active"
+            git push --quiet origin "$branch"
+            gh pr merge --squash --delete-branch "$number"
+            merged=1
+          done < submissions.txt
+
+          # A GITHUB_TOKEN merge does not trigger `push` workflows, and these entries
+          # are new, so kick the crawl instead of waiting for the daily run
+          # (workflow_dispatch does fire with that token).
+          if [ "$merged" = 1 ]; then
+            gh workflow run crawl.yml --ref master
+          fi
+
+  # Rescue path (see above): no submission PR covers such an entry. Docs already
+  # build for it, so this only brings its status up to date.
+  index:
+    needs: submissions
+    runs-on: ubuntu-latest
+    steps:
+      # persist-credentials: false — see dispatch.yml.
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Re-verify pending entries
+        id: reverify
+        run: cargo run -p registry-indexer --release -- reverify
+
+      - name: Create pull request
+        id: pr
+        if: steps.reverify.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: reverify
+          add-paths: registry/**
+          commit-message: ${{ steps.reverify.outputs.title }}
+          title: ${{ steps.reverify.outputs.title }}
+          body: |
+            Automated promotion of ${{ steps.reverify.outputs.count }} hand-merged
+            `pending` entr(y/ies) whose repository is now visible and carries a
+            published release, merged automatically.
+
+            Verified the same way as a submission: a `Veryl.pub` with at least one
+            release, in a project that has not opted out via
+            `[publish] register = false`.
+
+      - name: Merge pull request
+        if: steps.pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh pr merge --squash --delete-branch "${{ steps.pr.outputs.pull-request-number }}"

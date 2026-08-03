@@ -342,7 +342,7 @@ pub fn run(args: CrawlArgs) -> Result<()> {
     Ok(())
 }
 
-fn entry_files(registry_dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn entry_files(registry_dir: &Path) -> Vec<PathBuf> {
     WalkDir::new(registry_dir)
         .into_iter()
         .flatten()

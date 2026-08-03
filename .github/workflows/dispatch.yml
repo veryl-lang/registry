@@ -1,8 +1,9 @@
 name: registry-submit
 
 # Fired by the intake Worker via repository_dispatch when `veryl publish`
-# registers a repository. The indexer verifies and writes the entry file; this
-# workflow opens a pull request for a maintainer to merge (initial policy).
+# registers a repository. A verified submission is merged straight away; an
+# unverified one stays an open PR for `reverify.yml`, so only verified entries
+# reach the index and no human is in the loop either way.
 
 on:
   repository_dispatch:
@@ -11,6 +12,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write # start the crawl (see the merge step)
 
 jobs:
   apply:
@@ -31,6 +33,7 @@ jobs:
         run: cargo run -p registry-indexer --release -- apply
 
       - name: Create pull request
+        id: pr
         if: steps.apply.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
@@ -38,20 +41,36 @@ jobs:
           add-paths: registry/**
           commit-message: "Register ${{ steps.apply.outputs.slug }}"
           title: "Register ${{ steps.apply.outputs.slug }} (${{ steps.apply.outputs.status }})"
-          # Maintainer-facing moderation note: the submitting author never sees this
-          # PR (it lands in this repo, not theirs). Author-facing guidance — e.g. to
-          # push — is emitted by the `veryl register` CLI, the only channel they read.
+          # Maintainer-facing record: the submitting author never sees this PR (it
+          # lands in this repo, not theirs). Author-facing guidance — e.g. to push
+          # — is emitted by the `veryl register` CLI, the only channel they read.
           body: |
             Automated registry submission for `${{ steps.apply.outputs.slug }}`.
 
-            **Status: `${{ steps.apply.outputs.status }}`** — the entry lands as written on merge.
+            **Status: `${{ steps.apply.outputs.status }}`**
 
             - `active` — verified by clone: a `Veryl.toml` with the submitted project
               name exists and its `Veryl.pub` has at least one release (the author's
-              opt-in proof).
-            - `pending` — the repo or its release was not visible at submission time
-              (e.g. the author has not pushed yet). Safe to merge: the crawl builds docs
-              once the repo is reachable, and the daily crawl (or a later re-submission)
-              reconciles it to `active`.
+              opt-in proof). **Merged automatically**, no action needed.
+            - `pending` — the repo or its release was not visible at submission time.
+              Usually `veryl publish` recorded the release locally and the push had
+              not happened yet. This PR stays open and `reverify.yml` re-checks it
+              every night, promoting it to `active` and merging it once the
+              repository is reachable. Close it to reject the submission; merging it
+              by hand adds an unverified entry to the index.
 
-            Merge to add the entry to the index; close to reject.
+            To retract a merged entry, set its `status` to `yanked` or `disputed` in
+            a follow-up PR — the next crawl then drops its docs.
+
+      - name: Merge pull request
+        # Leaving an unverified one open is what keeps unverified entries out of the
+        # index; `reverify.yml` picks it up.
+        if: steps.pr.outputs.pull-request-number != '' && steps.apply.outputs.status == 'active'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh pr merge --squash --delete-branch "${{ steps.pr.outputs.pull-request-number }}"
+          # A GITHUB_TOKEN merge does not trigger `push` workflows, so start the
+          # crawl explicitly (workflow_dispatch does fire with that token).
+          gh workflow run crawl.yml --ref master

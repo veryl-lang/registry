@@ -1,4 +1,5 @@
-//! Registry indexer: `apply` writes an entry from a submission; `crawl` builds docs.
+//! Registry indexer: `apply` writes an entry from a submission, `reverify`
+//! promotes the ones that could not be verified yet, and `crawl` builds docs.
 //!
 //! `apply` runs on the `registry-submit` repository_dispatch: it verifies a
 //! submission and writes its entry file (the workflow opens the PR). `crawl` runs
@@ -7,7 +8,8 @@
 //!
 //! Verification is **tolerant** (see PLAN.md): if the repository or its published
 //! version is not visible yet (e.g. not pushed), the entry is written as `pending`
-//! rather than failing. Re-registering after a push re-verifies it to `active`.
+//! rather than failing — and its PR is not merged unattended, so the index only
+//! ever gains verified entries. `reverify` re-checks those later.
 
 mod crawl;
 mod model;
@@ -38,6 +40,8 @@ struct Cli {
 enum Cmd {
     /// Verify a submission and write its index entry.
     Apply(ApplyArgs),
+    /// Re-verify `pending` entries and promote the ones that now check out.
+    Reverify(ReverifyArgs),
     /// Crawl the index and build the docs site (read-only on the index).
     Crawl(crawl::CrawlArgs),
 }
@@ -53,9 +57,17 @@ struct ApplyArgs {
     index_root: PathBuf,
 }
 
+#[derive(Parser)]
+struct ReverifyArgs {
+    /// Index root that holds `registry/` (defaults to the current directory).
+    #[arg(long, default_value = ".")]
+    index_root: PathBuf,
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
         Cmd::Apply(args) => apply(args),
+        Cmd::Reverify(args) => reverify(args),
         Cmd::Crawl(args) => crawl::run(args),
     }
 }
@@ -85,7 +97,7 @@ fn apply(args: ApplyArgs) -> Result<()> {
         .join(segments.join("__"));
     let _ = fs::remove_dir_all(&clone_dir);
     let verify = if clone_repo(&submission.repo, &clone_dir) {
-        inspect_repo(&clone_dir, &submission.name)
+        inspect_repo(&clone_dir, Some(&submission.name))
     } else {
         Verify::default()
     };
@@ -136,14 +148,86 @@ fn apply(args: ApplyArgs) -> Result<()> {
     Ok(())
 }
 
+/// Re-verify the `pending` entries and promote the ones that now check out.
+///
+/// `veryl publish` records the release locally, so the submission that follows it
+/// usually arrives before the push and lands as `pending`. Nothing else re-checks
+/// it: `crawl` is read-only on the index, and the author has no reason to register
+/// again after pushing.
+///
+/// Promotion only, so a clone failure during a GitHub outage cannot rewrite the
+/// index — nor merge a submission that is not ready, since the workflow merges on
+/// what this writes.
+fn reverify(args: ReverifyArgs) -> Result<()> {
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let mut promoted: Vec<String> = Vec::new();
+
+    for path in crawl::entry_files(&args.index_root.join("registry")) {
+        let Some(mut entry) = load_existing(&path) else {
+            continue;
+        };
+        if entry.status != "pending" {
+            continue;
+        }
+        let Some((host, segments)) = registry_common::split_key(&entry.repo) else {
+            continue;
+        };
+
+        let clone_dir = std::env::temp_dir()
+            .join("veryl-registry-reverify")
+            .join(host)
+            .join(segments.join("__"));
+        let _ = fs::remove_dir_all(&clone_dir);
+        let verify = if clone_repo(&entry.repo, &clone_dir) {
+            inspect_repo(&clone_dir, None)
+        } else {
+            Verify::default()
+        };
+        let _ = fs::remove_dir_all(&clone_dir);
+
+        if !verify.verified {
+            continue;
+        }
+        entry.status = "active".to_string();
+        entry.projects = verify.projects;
+        entry.last_verified = Some(now.clone());
+
+        let mut json = serde_json::to_string_pretty(&entry)?;
+        json.push('\n');
+        fs::write(&path, &json).with_context(|| format!("writing {}", path.display()))?;
+        println!("{}: active", entry.repo);
+        promoted.push(entry.repo);
+    }
+
+    github_output("changed", &(!promoted.is_empty()).to_string());
+    github_output("count", &promoted.len().to_string());
+    // Built here, not in the workflow, so the singular case reads properly.
+    github_output(
+        "title",
+        &match promoted.as_slice() {
+            [] => String::new(),
+            [one] => format!("Promote {one} to active"),
+            many => format!("Promote {} pending entries to active", many.len()),
+        },
+    );
+    if promoted.is_empty() {
+        println!("no pending entry became verifiable");
+    } else {
+        for repo in &promoted {
+            github_summary(&format!("- **{repo}** → `active`\n"));
+        }
+    }
+    Ok(())
+}
+
 /// Result of inspecting a cloned repository.
 #[derive(Debug, Default)]
 struct Verify {
-    /// The named project exists and its `Veryl.pub` has at least one release.
+    /// A project in scope (see `inspect_repo`) has a release in its `Veryl.pub`.
     verified: bool,
     /// All Veryl project names found in the repository.
     projects: Vec<String>,
-    /// The named project set `[publish] register = false` (explicit opt-out).
+    /// A project in scope set `[publish] register = false`.
     opted_out: bool,
 }
 
@@ -237,11 +321,14 @@ fn clone_repo(repo: &str, dir: &Path) -> bool {
     crawl::run_bounded(cmd, CLONE_TIMEOUT)
 }
 
-/// Walk a cloned repository, collecting every Veryl project name and checking
-/// whether the named project has published at least one release (its sibling
-/// `Veryl.pub` has a non-empty `releases`). That release is the author's opt-in
-/// proof: a third party cannot fabricate it in someone else's repository.
-fn inspect_repo(dir: &Path, name: &str) -> Verify {
+/// Collect every Veryl project name and check whether one has published a release.
+/// That release is the author's opt-in proof: a third party cannot fabricate it in
+/// someone else's repository.
+///
+/// `name` scopes the check to the submitted project. `reverify` passes `None` — an
+/// entry records the repository, not which project was submitted, and a release in
+/// any non-opted-out project proves as much for the entry.
+fn inspect_repo(dir: &Path, name: Option<&str>) -> Verify {
     let mut projects = Vec::new();
     let mut verified = false;
     let mut opted_out = false;
@@ -250,23 +337,22 @@ fn inspect_repo(dir: &Path, name: &str) -> Verify {
         if entry.file_name() != "Veryl.toml" {
             continue;
         }
-        let Some((project_name, register)) = model::read_name_and_register(entry.path()) else {
+        let Some(info) = model::read_project(entry.path()) else {
             continue;
         };
         // A project name becomes a filesystem path segment in `crawl`; ignore
         // anything the registry would not accept as a name.
-        if !registry_common::is_valid_project_name(&project_name) {
+        if !registry_common::is_valid_project_name(&info.name) {
             continue;
         }
-        if project_name == name {
-            if register == Some(false) {
+        if name.is_none_or(|n| n == info.name) {
+            if info.register == Some(false) {
                 opted_out = true;
-            }
-            if !model::read_releases(&entry.path().with_file_name("Veryl.pub")).is_empty() {
+            } else if !model::read_releases(&entry.path().with_file_name("Veryl.pub")).is_empty() {
                 verified = true;
             }
         }
-        projects.push(project_name);
+        projects.push(info.name);
     }
 
     projects.sort();
@@ -332,7 +418,7 @@ mod tests {
             "Veryl.pub",
             "[[releases]]\nversion = \"1.0.0\"\nrevision = \"abc\"\n",
         );
-        let v = inspect_repo(&dir, "fifo");
+        let v = inspect_repo(&dir, Some("fifo"));
         assert!(v.verified);
         assert_eq!(v.projects, vec!["fifo".to_string()]);
     }
@@ -341,7 +427,7 @@ mod tests {
     fn pending_when_pub_is_missing_or_empty() {
         let dir = fixture("nopub");
         write(&dir, "Veryl.toml", "[project]\nname = \"fifo\"\n");
-        let v = inspect_repo(&dir, "fifo");
+        let v = inspect_repo(&dir, Some("fifo"));
         assert!(!v.verified);
         assert_eq!(v.projects, vec!["fifo".to_string()]);
     }
@@ -356,7 +442,7 @@ mod tests {
             "b/Veryl.pub",
             "[[releases]]\nversion=\"0.1.0\"\nrevision=\"r\"\n",
         );
-        let v = inspect_repo(&dir, "bbb");
+        let v = inspect_repo(&dir, Some("bbb"));
         assert!(v.verified);
         assert_eq!(v.projects, vec!["aaa".to_string(), "bbb".to_string()]);
     }
@@ -369,7 +455,36 @@ mod tests {
             "Veryl.toml",
             "[project]\nname = \"fifo\"\n[publish]\nregister = false\n",
         );
-        assert!(inspect_repo(&dir, "fifo").opted_out);
+        assert!(inspect_repo(&dir, Some("fifo")).opted_out);
+    }
+
+    #[test]
+    fn reverify_accepts_a_release_in_any_project() {
+        let dir = fixture("anyproject");
+        write(&dir, "a/Veryl.toml", "[project]\nname = \"aaa\"\n");
+        write(&dir, "b/Veryl.toml", "[project]\nname = \"bbb\"\n");
+        write(
+            &dir,
+            "b/Veryl.pub",
+            "[[releases]]\nversion=\"0.1.0\"\nrevision=\"r\"\n",
+        );
+        assert!(inspect_repo(&dir, None).verified);
+    }
+
+    #[test]
+    fn reverify_ignores_an_opted_out_projects_release() {
+        let dir = fixture("anyoptout");
+        write(
+            &dir,
+            "Veryl.toml",
+            "[project]\nname = \"fifo\"\n[publish]\nregister = false\n",
+        );
+        write(
+            &dir,
+            "Veryl.pub",
+            "[[releases]]\nversion = \"1.0.0\"\nrevision = \"abc\"\n",
+        );
+        assert!(!inspect_repo(&dir, None).verified);
     }
 
     #[test]
@@ -380,11 +495,11 @@ mod tests {
             "Veryl.toml",
             "[project]\nname = \"fifo\"\n[publish]\nregister = true\n",
         );
-        assert!(!inspect_repo(&on, "fifo").opted_out);
+        assert!(!inspect_repo(&on, Some("fifo")).opted_out);
 
         let unset = fixture("unset");
         write(&unset, "Veryl.toml", "[project]\nname = \"fifo\"\n");
-        assert!(!inspect_repo(&unset, "fifo").opted_out);
+        assert!(!inspect_repo(&unset, Some("fifo")).opted_out);
     }
 
     #[test]
