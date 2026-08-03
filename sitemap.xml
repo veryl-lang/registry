@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://registry.veryl-lang.org/</loc></url>
+  <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-fixedpoint-veryl/gndless_fixedpoint/0.1.0/</loc><lastmod>2026-07-28</lastmod></url>
+  <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-interpolation-veryl/gndless_interpolation/0.1.0/</loc><lastmod>2026-07-29</lastmod></url>
   <url><loc>https://registry.veryl-lang.org/github.com/rggen/rggen-veryl-rtl/rggen/0.8.1/</loc><lastmod>2026-07-15</lastmod></url>
   <url><loc>https://registry.veryl-lang.org/github.com/rggen/rggen-veryl-rtl/rggen/0.8.0/</loc></url>
   <url><loc>https://registry.veryl-lang.org/github.com/veryl-lang/vip/vip/0.1.0/</loc><lastmod>2026-07-14</lastmod></url>
