@@ -68,24 +68,36 @@ jobs:
               echo "PR #$number ($branch): branch gone, skipping"
               continue
             }
+            entries=$(git diff --name-only "origin/master...HEAD")
             # Same guard, second half: a branch touching anything but entry files
             # is a hand-edit, not something to merge blind.
-            if git diff --name-only "origin/master...HEAD" | grep -qvE '^registry/.+\.json$'; then
-              echo "PR #$number ($branch): changes more than registry entries, skipping"
+            if [ -z "$entries" ] || printf '%s\n' "$entries" | grep -qvE '^registry/.+\.json$'; then
+              echo "PR #$number ($branch): not a plain submission, skipping"
               continue
             fi
+
             ./target/release/registry-indexer reverify
-            if git diff --quiet; then
-              echo "PR #$number ($branch): still unverifiable"
+            if ! git diff --quiet; then
+              # The branch carries the whole index, so an unrelated stale entry may
+              # be promoted alongside; the message names whichever comes first.
+              file=$(git diff --name-only | head -1)
+              slug=${file#registry/}
+              slug=${slug%.json}
+              git commit --quiet -am "Promote $slug to active"
+              git push --quiet origin "$branch"
+            fi
+
+            # Merge on the state of the entries, not on whether this run promoted
+            # them: a branch already `active` because an earlier merge failed would
+            # otherwise never be retried.
+            hold=0
+            for f in $entries; do
+              if [ ! -f "$f" ] || grep -q '"status": "pending"' "$f"; then hold=1; fi
+            done
+            if [ "$hold" = 1 ]; then
+              echo "PR #$number ($branch): not verified, leaving open"
               continue
             fi
-            # The branch carries the whole index, so an unrelated stale entry may be
-            # promoted alongside; the message names whichever comes first.
-            file=$(git diff --name-only | head -1)
-            slug=${file#registry/}
-            slug=${slug%.json}
-            git commit --quiet -am "Promote $slug to active"
-            git push --quiet origin "$branch"
             gh pr merge --squash --delete-branch "$number"
             merged=1
           done < submissions.txt
