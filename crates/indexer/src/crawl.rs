@@ -957,6 +957,9 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
         .iter()
         .flat_map(|p| p.categories.iter().map(String::as_str))
         .collect();
+    // Kept in `data-all` too: the script swaps in "K of N packages" while a filter
+    // is active and restores this when it clears.
+    let counts = count_text(projects.len(), by_repo.len());
 
     let markup = html! {
         (DOCTYPE)
@@ -986,6 +989,9 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
                 header.hero {
                     h1 { span.dot {} "Veryl registry" }
                     p.tagline { "Published Veryl projects and their generated documentation." }
+                }
+                @if !projects.is_empty() {
+                    p #count data-all=(counts) { (counts) }
                 }
                 input #q type="search" placeholder="Search packages…" autocomplete="off";
                 div.catbar {
@@ -1019,6 +1025,15 @@ fn gallery_html(projects: &[GalleryProject]) -> String {
         }
     };
     markup.into_string()
+}
+
+/// The gallery's headline count, e.g. "12 packages in 8 repositories".
+fn count_text(packages: usize, repos: usize) -> String {
+    format!(
+        "{packages} package{} in {repos} repositor{}",
+        if packages == 1 { "" } else { "s" },
+        if repos == 1 { "y" } else { "ies" }
+    )
 }
 
 /// schema.org `ItemList` of the documented projects, embedded as JSON-LD for
@@ -1216,6 +1231,12 @@ mod tests {
     }
 
     #[test]
+    fn count_text_is_singular_aware() {
+        assert_eq!(count_text(1, 1), "1 package in 1 repository");
+        assert_eq!(count_text(12, 8), "12 packages in 8 repositories");
+    }
+
+    #[test]
     fn versions_sort_by_semver_desc() {
         let mut v = vec!["1.9.0".into(), "1.10.0".into(), "1.2.0".into()];
         sort_versions_desc(&mut v);
@@ -1311,7 +1332,31 @@ mod tests {
 
     #[test]
     fn gallery_handles_empty() {
-        assert!(gallery_html(&[]).contains("No projects yet"));
+        let html = gallery_html(&[]);
+        assert!(html.contains("No projects yet"));
+        assert!(!html.contains("id=\"count\"")); // "0 packages" would say it twice
+    }
+
+    #[test]
+    fn gallery_counts_packages_and_repos() {
+        let g = |repo: &str, project: &str| GalleryProject {
+            repo: repo.into(),
+            project: project.into(),
+            description: None,
+            license: None,
+            authors: vec![],
+            categories: vec![],
+            updated: None,
+            versions: vec!["1.0.0".into()],
+        };
+        let html = gallery_html(&[
+            g("github.com/alice/fifo", "fifo"),
+            g("github.com/alice/fifo", "fifo_tb"),
+            g("github.com/bob/uart", "uart"),
+        ]);
+        assert!(html.contains(">3 packages in 2 repositories<"));
+        // the script restores this when a filter clears
+        assert!(html.contains("data-all=\"3 packages in 2 repositories\""));
     }
 
     #[test]
