@@ -70,6 +70,8 @@ struct Project {
     license: Option<String>,
     authors: Vec<String>,
     categories: Vec<String>,
+    /// `[publish] register = false`.
+    opted_out: bool,
 }
 
 /// One project's documented versions + display metadata, for the gallery.
@@ -231,6 +233,17 @@ pub fn run(args: CrawlArgs) -> Result<()> {
 
         let projects = discover_projects(&work);
         for project in &projects {
+            // The opt-out can postdate the entry, and an entry merged while its repo
+            // was unreachable was never checked against one — so honor it here too,
+            // by deleting: `keep` is per repo, so reconcile would preserve these.
+            if project.opted_out {
+                let dir = project_dir(&args.docs_out, host, &segments, &project.name);
+                if dir.exists() {
+                    let _ = fs::remove_dir_all(&dir);
+                }
+                eprintln!("opted out: {}/{}", entry.repo, project.name);
+                continue;
+            }
             // Versions become filesystem path segments; drop any that are not
             // valid semver before they reach `doc_dest`.
             let releases: Vec<_> = model::read_releases(&project.dir.join("Veryl.pub"))
@@ -342,7 +355,7 @@ pub fn run(args: CrawlArgs) -> Result<()> {
     Ok(())
 }
 
-fn entry_files(registry_dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn entry_files(registry_dir: &Path) -> Vec<PathBuf> {
     WalkDir::new(registry_dir)
         .into_iter()
         .flatten()
@@ -383,6 +396,8 @@ fn discover_projects(root: &Path) -> Vec<Project> {
                 license: info.license,
                 authors: info.authors,
                 categories: info.categories,
+                // Reported, not skipped: the caller removes such a project's docs.
+                opted_out: info.register == Some(false),
             });
         }
     }
@@ -1157,6 +1172,34 @@ mod tests {
             .map(|p| p.name)
             .collect();
         assert_eq!(names, vec!["good".to_string()]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_flags_opted_out_project() {
+        let root = std::env::temp_dir().join("veryl-reg-discover-optout");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("in")).unwrap();
+        fs::write(
+            root.join("in").join("Veryl.toml"),
+            "[project]\nname = \"in\"\n[publish]\nregister = true\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("out")).unwrap();
+        fs::write(
+            root.join("out").join("Veryl.toml"),
+            "[project]\nname = \"out\"\n[publish]\nregister = false\n",
+        )
+        .unwrap();
+        let mut flags: Vec<(String, bool)> = discover_projects(&root)
+            .into_iter()
+            .map(|p| (p.name, p.opted_out))
+            .collect();
+        flags.sort(); // WalkDir order is filesystem-dependent
+        assert_eq!(
+            flags,
+            vec![("in".to_string(), false), ("out".to_string(), true)]
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

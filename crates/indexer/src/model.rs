@@ -45,13 +45,15 @@ struct VerylPublish {
     register: Option<bool>,
 }
 
-/// The subset of `Veryl.toml` `[project]` the registry surfaces.
+/// The subset of `Veryl.toml` the registry surfaces, plus the publish opt-out.
 pub struct ProjectInfo {
     pub name: String,
     pub description: Option<String>,
     pub license: Option<String>,
     pub authors: Vec<String>,
     pub categories: Vec<String>,
+    /// `[publish] register`; `Some(false)` is an explicit opt-out.
+    pub register: Option<bool>,
 }
 
 /// Minimal lax view of `Veryl.pub`.
@@ -68,8 +70,8 @@ pub struct Release {
     pub revision: String,
 }
 
-/// Read `[project]` (name + description) from a `Veryl.toml`, or `None` if it
-/// can't be parsed.
+/// Read `[project]` plus `[publish] register` from a `Veryl.toml`, or `None` if
+/// it can't be parsed.
 pub fn read_project(veryl_toml: &Path) -> Option<ProjectInfo> {
     let text = fs::read_to_string(veryl_toml).ok()?;
     let parsed: VerylToml = toml::from_str(&text).ok()?;
@@ -79,16 +81,8 @@ pub fn read_project(veryl_toml: &Path) -> Option<ProjectInfo> {
         license: parsed.project.license,
         authors: parsed.project.authors,
         categories: parsed.project.categories,
+        register: parsed.publish.and_then(|p| p.register),
     })
-}
-
-/// `[project].name` and `[publish].register` from one `Veryl.toml` parse.
-/// `register` is `Some(false)` only for an explicit opt-out.
-pub fn read_name_and_register(veryl_toml: &Path) -> Option<(String, Option<bool>)> {
-    let text = fs::read_to_string(veryl_toml).ok()?;
-    let parsed: VerylToml = toml::from_str(&text).ok()?;
-    let register = parsed.publish.and_then(|p| p.register);
-    Some((parsed.project.name, register))
 }
 
 /// Read the releases from a `Veryl.pub`, or an empty vector if missing/unparsable.
