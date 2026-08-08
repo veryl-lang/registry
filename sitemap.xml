@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://registry.veryl-lang.org/</loc></url>
-  <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-adat-veryl/gndless_adat/0.2.0/</loc><lastmod>2026-08-02</lastmod></url>
+  <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-adat-veryl/gndless_adat/0.3.0/</loc><lastmod>2026-08-08</lastmod></url>
+  <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-adat-veryl/gndless_adat/0.2.0/</loc></url>
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-adat-veryl/gndless_adat/0.1.0/</loc></url>
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-delta-sigma-veryl/gndless_delta_sigma/0.2.0/</loc><lastmod>2026-08-04</lastmod></url>
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-delta-sigma-veryl/gndless_delta_sigma/0.1.1/</loc></url>
@@ -21,7 +22,8 @@
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-nco-veryl/gndless_nco/0.1.0/</loc><lastmod>2026-07-29</lastmod></url>
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-oscillator-veryl/gndless_oscillator/0.2.0/</loc><lastmod>2026-08-04</lastmod></url>
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-oscillator-veryl/gndless_oscillator/0.1.0/</loc></url>
-  <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-sample-rate-conversion-veryl/gndless_sample_rate_conversion/0.3.0/</loc><lastmod>2026-08-04</lastmod></url>
+  <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-sample-rate-conversion-veryl/gndless_sample_rate_conversion/0.4.0/</loc><lastmod>2026-08-07</lastmod></url>
+  <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-sample-rate-conversion-veryl/gndless_sample_rate_conversion/0.3.0/</loc></url>
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-sample-rate-conversion-veryl/gndless_sample_rate_conversion/0.2.0/</loc></url>
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-sample-rate-conversion-veryl/gndless_sample_rate_conversion/0.1.0/</loc></url>
   <url><loc>https://registry.veryl-lang.org/github.com/AkiyukiOkayasu/gndless-spi-veryl/gndless_spi/0.1.0/</loc><lastmod>2026-07-31</lastmod></url>
