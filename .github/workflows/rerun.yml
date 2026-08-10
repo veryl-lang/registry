@@ -1,0 +1,40 @@
+name: rerun-submit
+
+# A `registry-submit` run that dies on infrastructure — no runner acquired, runner
+# lost communication — drops the submission for good: the Worker is stateless, so
+# the dispatch payload exists nowhere else, and `reverify` only ever sees a
+# submission that already reached the index or an open PR. Every other workflow
+# here runs daily and heals itself; this one does not.
+#
+# A rerun replays the original `repository_dispatch` with its `client_payload`,
+# which is what `apply` reads. A genuine `apply` failure is rerun too; `apply` is
+# idempotent, so that costs one wasted run.
+
+on:
+  workflow_run:
+    workflows: [registry-submit]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  rerun:
+    # Each rerun fires this workflow again when it completes, so without the
+    # attempt guard a submission that keeps failing would loop forever. A second
+    # infrastructure failure is a real outage; leave it to a maintainer.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Retrying straight into an ongoing incident would burn the single retry.
+      - name: Wait out the incident
+        run: sleep 300
+
+      - name: Rerun the failed submission
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh run rerun ${{ github.event.workflow_run.id }} --failed
