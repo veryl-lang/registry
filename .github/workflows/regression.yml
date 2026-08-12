@@ -1,10 +1,17 @@
 name: Regression
 
+# A submission PR touches nothing but its entry JSON, so there is no Rust change
+# to test. Skipping it also drops the approval gate those bot-authored PRs hit,
+# which otherwise leaves every one of them sitting at `action_required`.
 on:
   push:
     branches:
       - master
+    paths-ignore:
+      - "registry/**"
   pull_request:
+    paths-ignore:
+      - "registry/**"
 
 jobs:
   test:
