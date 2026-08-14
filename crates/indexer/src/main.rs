@@ -62,6 +62,11 @@ struct ReverifyArgs {
     /// Index root that holds `registry/` (defaults to the current directory).
     #[arg(long, default_value = ".")]
     index_root: PathBuf,
+
+    /// Write the repositories that opted out to this file, one per line. Always
+    /// rewritten, so the caller can reuse it across runs.
+    #[arg(long)]
+    opted_out: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -158,9 +163,14 @@ fn apply(args: ApplyArgs) -> Result<()> {
 /// Promotion only, so a clone failure during a GitHub outage cannot rewrite the
 /// index — nor merge a submission that is not ready, since the workflow merges on
 /// what this writes.
+///
+/// An entry whose author opted out since submitting can never be promoted, so it
+/// is reported through `--opted-out` for the workflow to close its PR; the entry
+/// itself is left untouched here, like every other unpromotable one.
 fn reverify(args: ReverifyArgs) -> Result<()> {
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let mut promoted: Vec<String> = Vec::new();
+    let mut opted_out: Vec<String> = Vec::new();
 
     for path in crawl::entry_files(&args.index_root.join("registry")) {
         let Some(mut entry) = load_existing(&path) else {
@@ -186,6 +196,16 @@ fn reverify(args: ReverifyArgs) -> Result<()> {
         let _ = fs::remove_dir_all(&clone_dir);
 
         if !verify.verified {
+            // Only when nothing else in the repository is registerable: a monorepo
+            // where one project opted out and another published is still promoted.
+            if verify.opted_out {
+                println!("{}: opted out ([publish] register = false)", entry.repo);
+                github_summary(&format!(
+                    "- **{}** → opted out (`[publish] register = false`)\n",
+                    entry.repo
+                ));
+                opted_out.push(entry.repo);
+            }
             continue;
         }
         entry.status = "active".to_string();
@@ -217,7 +237,19 @@ fn reverify(args: ReverifyArgs) -> Result<()> {
             github_summary(&format!("- **{repo}** → `active`\n"));
         }
     }
+
+    // Written unconditionally: the workflow runs this once per submission PR and
+    // reads the same path each time, so a stale list would close the wrong PR.
+    if let Some(path) = &args.opted_out {
+        fs::write(path, opted_out_report(&opted_out))
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
     Ok(())
+}
+
+/// The `--opted-out` report: one repository per line, empty when there is none.
+fn opted_out_report(repos: &[String]) -> String {
+    repos.iter().map(|r| format!("{r}\n")).collect()
 }
 
 /// Result of inspecting a cloned repository.
@@ -484,7 +516,18 @@ mod tests {
             "Veryl.pub",
             "[[releases]]\nversion = \"1.0.0\"\nrevision = \"abc\"\n",
         );
-        assert!(!inspect_repo(&dir, None).verified);
+        let v = inspect_repo(&dir, None);
+        assert!(!v.verified);
+        assert!(v.opted_out); // reported so the workflow closes the submission PR
+    }
+
+    #[test]
+    fn opted_out_report_is_one_repo_per_line() {
+        assert_eq!(opted_out_report(&[]), "");
+        assert_eq!(
+            opted_out_report(&["github.com/a/b".into(), "github.com/c/d".into()]),
+            "github.com/a/b\ngithub.com/c/d\n"
+        );
     }
 
     #[test]
