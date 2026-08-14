@@ -55,9 +55,10 @@ jobs:
             - `pending` — the repo or its release was not visible at submission time.
               Usually `veryl publish` recorded the release locally and the push had
               not happened yet. This PR stays open and `reverify.yml` re-checks it
-              every night, promoting it to `active` and merging it once the
-              repository is reachable. Close it to reject the submission; merging it
-              by hand adds an unverified entry to the index.
+              every night: it promotes the entry to `active` and merges once the
+              repository is reachable, or closes this PR if the author has since
+              opted out (`[publish] register = false`). Close it to reject the
+              submission; merging it by hand adds an unverified entry to the index.
 
             To retract a merged entry, set its `status` to `yanked` or `disputed` in
             a follow-up PR — the next crawl then drops its docs.

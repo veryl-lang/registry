@@ -10,6 +10,9 @@ name: reverify
 # branch carries the whole index, so both could promote the same entry and the
 # second merge would conflict.
 #
+# A submission whose author has since committed `[publish] register = false` can
+# never be promoted, so its PR is closed rather than re-checked every night.
+#
 # An hour before the crawl, so a promotion is documented the same night.
 
 on:
@@ -76,7 +79,31 @@ jobs:
               continue
             fi
 
-            ./target/release/registry-indexer reverify
+            ./target/release/registry-indexer reverify --opted-out opted-out.txt
+
+            # The opt-out is the author's and outranks the submission, so this PR
+            # is dead: close it instead of re-cloning the repository every night.
+            # Matched per entry — the branch carries the whole index, and an
+            # unrelated opted-out entry must not close this PR.
+            optout=""
+            for f in $entries; do
+              slug=${f#registry/}
+              slug=${slug%.json}
+              if grep -qxF "$slug" opted-out.txt; then optout=$slug; fi
+            done
+            if [ -n "$optout" ]; then
+              comment=$(printf '%s\n' \
+                "\`$optout\` now sets \`[publish] register = false\`, so the registry" \
+                "may not carry it. The opt-out is the author's and no re-check can" \
+                "promote this submission, so this PR is closed." \
+                "" \
+                "Dropping that line (or setting it to \`true\`) and registering again" \
+                "opens a fresh PR.")
+              gh pr close "$number" --delete-branch --comment "$comment"
+              echo "PR #$number ($branch): opted out, closed"
+              continue
+            fi
+
             if ! git diff --quiet; then
               # The branch carries the whole index, so an unrelated stale entry may
               # be promoted alongside; the message names whichever comes first.
